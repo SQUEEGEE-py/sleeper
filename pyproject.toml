@@ -1,0 +1,21 @@
+[project]
+name = "sleeper-lockin"
+version = "0.1.0"
+description = "Decision-support tool for an 8-team Sleeper NBA Lock-In fantasy league."
+requires-python = ">=3.11"
+dependencies = [
+    "numpy",
+    "pandas",
+    "scipy",
+    "httpx",
+    "pydantic",
+    "python-dotenv",
+]
+
+[tool.uv]
+package = false
+
+[dependency-groups]
+dev = [
+    "pytest",
+]

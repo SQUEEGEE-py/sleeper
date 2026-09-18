@@ -1,0 +1,75 @@
+{
+  "_comment": "Source of truth for league rules. Verify against Sleeper's GET /v1/league/<league_id> scoring_settings + roster_positions on first run and fail loudly on mismatch.",
+  "platform": "sleeper",
+  "league_id": "TODO_FILL_IN",
+  "sport": "nba",
+  "season": "2026-27",
+  "season_start": "2026-10-20",
+  "game_mode": "lock_in",
+  "teams": 8,
+  "draft_type": "snake",
+  "draft_date": "TBD",
+  "draft_slot": null,
+
+  "roster_positions": ["PG", "SG", "G", "SF", "PF", "F", "C", "C", "UTIL", "BN", "BN", "BN", "BN", "IR", "IR"],
+  "starters": 9,
+  "bench": 4,
+  "ir": 2,
+  "roster_size_active": 13,
+
+  "playoffs": { "teams": 4, "start_week": 22 },
+  "trade_deadline_week": 19,
+  "waiver_days": 1,
+  "draft_pick_trading": false,
+
+  "scoring": {
+    "pts": 1.5,
+    "reb": 1.0,
+    "ast": 1.0,
+    "stl": 1.0,
+    "blk": 1.0,
+    "to": -1.0,
+    "fg3m": 0.5,
+    "dd": 3.0,
+    "td": 4.0,
+    "tech_foul": -1.0,
+    "flagrant_foul": -2.0,
+    "bonus_40_pts": 3.0,
+    "bonus_50_pts": 4.0
+  },
+
+  "scoring_ambiguities": {
+    "_comment": "Unresolved. Implement both branches behind these flags; default to the conservative reading and confirm with the commissioner or by inspecting a real box score in week 1.",
+    "bonuses_stack": {
+      "value": false,
+      "question": "Does a 50-point game score both bonus_40_pts and bonus_50_pts (7) or only bonus_50_pts (4)?"
+    },
+    "td_includes_dd": {
+      "value": false,
+      "question": "Does a triple-double also award the double-double bonus (7 total) or only the triple-double bonus (4)?"
+    },
+    "quadruple_double": {
+      "value": "treat_as_td",
+      "question": "Rare enough to ignore, but do not crash on it."
+    }
+  },
+
+  "lock_in_rules": {
+    "games_counted_per_player_per_week": 1,
+    "must_lock_before": "that player's next game tips off",
+    "eligible_only_if": "player was in the starting lineup when that game began",
+    "bench_players_lockable": false,
+    "no_lock_fallback": "team's final game of the week is used, which is 0 if the player did not play",
+    "revert_to_earlier_game": false,
+    "lock_reversible": false,
+    "post_lock": "player's slot is fixed for the week and he cannot be moved or reused"
+  },
+
+  "strategy_constants": {
+    "_comment": "Derived from the settings above. Used by the valuation engine.",
+    "center_slots_leaguewide": 16,
+    "starter_slots_leaguewide": 72,
+    "rostered_players_leaguewide": 104,
+    "playoff_cut_line": "top 4 of 8"
+  }
+}
