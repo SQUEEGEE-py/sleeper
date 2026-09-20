@@ -1,7 +1,8 @@
 # CLAUDE.md
 
 Context for Claude Code working in this repo. Read `docs/SPEC.md` for the full design and
-`docs/TASKS.md` for the current milestone.
+`docs/TASKS.md` for the milestone list. **Current state and next steps are in the "Current
+state" section below** — read it before starting work, it says what is actually built.
 
 ## What this is
 
@@ -33,6 +34,64 @@ ends with the user taking the action in the Sleeper app.
 6. **Verify third-party endpoints before building against them.** The URLs in the spec were
    accurate when written but these are mostly undocumented or fast-moving APIs. Probe first,
    then write the client.
+
+## Current state (2026-09-19)
+
+**M0 complete** (commit `1d14dc4`, pushed to `origin/main`). **M1 not started.**
+
+What exists and works:
+
+- `uv` project on Python 3.11 with the M0 deps. Run anything with `uv run python -m <module>`.
+- Repo skeleton from SPEC §1. Modules belonging to later milestones are **empty placeholder
+  files, not stubs** — `scoring.py`, `lockin.py`, `distributions.py` and friends are 0 bytes
+  on purpose. Don't mistake them for work in progress.
+- `engine/ingest/sleeper.py` — typed pydantic client for the SPEC §2.1 endpoints. Every
+  response is cached to disk under `data/cache/sleeper/` with a fetch timestamp; `players/nba`
+  is TTL-capped at 24h. Reruns and tests never need the network.
+- `engine/jobs/verify_league.py` — diffs live `scoring_settings` and `roster_positions`
+  against `config/league.json`, prints a readable diff, exits non-zero on mismatch.
+
+Endpoints probed against the live API on 2026-09-17 per rule 6, using a public league:
+`/league/{id}` (`scoring_settings` dict, `roster_positions` list), `/rosters`, `/users`,
+`/drafts`, and `/players/nba` (dict keyed by player_id, ~2100 players, 2.4 MB). All match the
+shapes the spec describes.
+
+### Blockers, in priority order
+
+1. **`config/league.json` still has `league_id: "TODO_FILL_IN"`.** `verify_league` exits 1 with
+   an explicit message until it is filled in, which means the M0 acceptance test — print the
+   league name, 8 teams, the roster slots — **has never actually run against the real league.**
+   Highest-value thing to unblock; everything downstream assumes config matches reality.
+2. **Sleeper's NBA `scoring_settings` key names are unconfirmed.** The endpoint *shapes* were
+   verified with an NFL league; the NBA field names were not. So `diff_scoring` compares
+   `config/league.json`'s own key names verbatim, and reports a config key that is absent from
+   the live payload as its own distinct case rather than guessing a translation table
+   (`flagrant_foul` vs `pf_flag`, `bonus_40_pts` vs `bonus_pts_40`, etc). Expect the first real
+   run to surface name mismatches. Resolve them by reading the live payload and telling the
+   user, never by inventing a mapping.
+3. **Both `scoring_ambiguities` remain unresolved** (`bonuses_stack`, `td_includes_dd`). Per
+   SPEC §4 the empirical fix is to recompute real week-1 box scores and diff against Sleeper's
+   own totals, which is impossible before the season opens. Both branches stay behind flags.
+
+### Next step — M1 (scoring engine)
+
+`engine/model/scoring.py` per SPEC §4, then `tests/test_scoring.py` over 8–10 hand-scored
+fixtures in `tests/fixtures/`. The parts that are easy to get wrong:
+
+- Every weight comes from `config/league.json`. No hardcoded numbers anywhere, including in
+  the tests.
+- Both ambiguity flags honored, and the suite must pass under **both** settings of each.
+- `quadruple_double: "treat_as_td"` must not crash.
+- No network in any test.
+
+A fixture set with hand-computed expected values has been drafted and is **awaiting the user's
+review** before the test file is written; the user asked to check the arithmetic first. The
+fixtures that actually discriminate between flag settings are the triple-double, the 50-point
+game, and a 50-point triple-double that exercises both flags at once. The remaining ones
+(plain line, double-double, 40-point game, tech, high-turnover, flagrant, quadruple-double)
+are flag-independent except where noted.
+
+Do not start M2 until M1's acceptance test passes.
 
 ## Stack
 
