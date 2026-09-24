@@ -39,6 +39,19 @@ ends with the user taking the action in the Sleeper app.
 
 **M0 through M4 complete — the pre-draft board ships.** M5 (live draft assistant) not started.
 
+Everything runnable today, in the order you would use it:
+
+```
+uv run pytest                                             # 229 tests, none need the network
+uv run python -m engine.jobs.verify_league                # config vs live Sleeper; exits 1 on drift
+uv run python -m engine.jobs.ingest_history [--force]     # LOCAL ONLY: logs + schedule -> parquet
+uv run python -m engine.jobs.build_board [--top 120]      # -> data/board/board.{csv,html}
+uv run python -m engine.jobs.player_value "Jokic" [--compare "Kawhi" ...]
+```
+
+Per-file test counts: scoring 89, lockin 29, distributions 27, nba_stats 26, lineup 25,
+player_ids 22, valuation 11.
+
 What exists and works:
 
 - `uv` project on Python 3.11 with the M0 deps. Run anything with `uv run python -m <module>`.
@@ -146,7 +159,7 @@ How it is put together, so it does not get re-litigated:
 ### M2 — historical ingest (done)
 
 `engine/ingest/nba_stats.py` + `engine/jobs/ingest_history.py`. Run it by hand:
-`uv run python -m engine.jobs.ingest_history [--force]`. 22 tests, no network.
+`uv run python -m engine.jobs.ingest_history [--force]`. 26 tests, no network.
 
 On disk after a run (all gitignored and regenerable): **79,358 game-log rows** across 2023-24,
 2024-25 and 2025-26, plus the 2026-27 schedule, week grid, and the team x week games grid that
@@ -173,6 +186,13 @@ What was learned building it, so it is not rediscovered:
 - **Technicals and flagrants are not in `PlayerGameLogs`.** The league scores them; the
   endpoint only has personal fouls. Stored as 0.0 and listed in `GAME_LOG_MISSING_STATS` so
   the UI can mark them unmeasured. Recovering them needs play-by-play.
+- **The current season is fetched too, and always refetched** (`ingest_current_season`).
+  Completed seasons are cached because they never change; the season being played is not,
+  because changing is the point. Before opening night it returns an empty frame that still
+  carries the right columns, so no caller needs a September special case. Preseason goes to a
+  separate `preseason_logs_{season}.parquet`. The endpoint spells it **"Pre Season"** with a
+  space — get it wrong and you get an empty frame indistinguishable from "season not started",
+  so a test pins the constant.
 
 Sanity check, rescoring real 2025-26 logs through `scoring.py`: the top of the board is
 Dončić 68.9, Jokić 67.8, SGA 59.1, Wembanyama 57.0 mean fp/game, league mean 23.3 — exactly
@@ -231,7 +251,7 @@ Both of `docs/TASKS.md` M3's eyeball tests hold:
 ### M4 — the draft board (done) 🎯
 
 `uv run python -m engine.jobs.build_board [--top 120]` writes `data/board/board.csv` and
-`data/board/board.html` (gitignored, regenerable). 62 tests.
+`data/board/board.html` (gitignored, regenerable). 58 tests.
 
 **The HTML page is fully self-contained** — 39 KB, zero external references, no fetch, no CDN,
 no web fonts, dark mode, sticky header, client-side filter and sort. Verified by scanning the
