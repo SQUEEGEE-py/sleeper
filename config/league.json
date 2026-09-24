@@ -1,7 +1,7 @@
 {
   "_comment": "Source of truth for league rules. Verify against Sleeper's GET /v1/league/<league_id> scoring_settings + roster_positions on first run and fail loudly on mismatch.",
   "platform": "sleeper",
-  "league_id": "TODO_FILL_IN",
+  "league_id": "1405604996254339072",
   "sport": "nba",
   "season": "2026-27",
   "season_start": "2026-10-20",
@@ -11,10 +11,11 @@
   "draft_date": "TBD",
   "draft_slot": null,
 
-  "roster_positions": ["PG", "SG", "G", "SF", "PF", "F", "C", "C", "UTIL", "BN", "BN", "BN", "BN", "IR", "IR"],
+  "_roster_comment": "Verified against live roster_positions on 2026-09-23. There are NO IR slots -- the original transcription assumed 2. Confirmed twice: the league's roster_positions ends at the 4th BN, and the draft object's settings carry no slots_ir. SPEC §7.2's IR strategy (stashing injured stars at no active-roster cost) therefore does not apply to this league.",
+  "roster_positions": ["PG", "SG", "G", "SF", "PF", "F", "C", "C", "UTIL", "BN", "BN", "BN", "BN"],
   "starters": 9,
   "bench": 4,
-  "ir": 2,
+  "ir": 0,
   "roster_size_active": 13,
 
   "playoffs": { "teams": 4, "start_week": 22 },
@@ -22,6 +23,34 @@
   "waiver_days": 1,
   "draft_pick_trading": false,
 
+  "_from_live_settings": "Read off the live league on 2026-09-23. These were absent from the original transcription and none of them are yet reflected in docs/SPEC.md. Values are Sleeper's, not inferred.",
+  "divisions": 2,
+  "keepers": {
+    "enabled": false,
+    "_resolved": "NO KEEPERS. Confirmed 2026-09-23 on three independent signals: settings.type=0 (redraft; 1=keeper, 2=dynasty), all 8 pre-draft rosters have players=[] and keepers=[], and the draft is 13 rounds for 13 roster spots, which leaves no room for a kept player. Sleeper still reports max_keepers=1 -- that is an inert platform default in a redraft league, NOT a league rule. Do not reopen this from that field alone.",
+    "max_keepers_reported_by_sleeper": 1,
+    "previous_league_id": "1275683545209122816",
+    "_previous_league_note": "This league continues last season's. Nothing carries over, but that league's completed draft is real data for the M5 dress rehearsal (docs/TASKS.md M5, SPEC §9.6) -- a replayable 8-team snake draft with the same managers."
+  },
+  "waivers": {
+    "type": "faab",
+    "budget": 100,
+    "clear_days": 1,
+    "_note": "waiver_type=1 with waiver_budget=100 is FAAB bidding, not rolling priority. SPEC §7.3 ranks waiver targets but says nothing about what to bid."
+  },
+  "draft_settings_live": {
+    "draft_id": "1405604996266901504",
+    "status": "pre_draft",
+    "type": "snake",
+    "rounds": 13,
+    "pick_timer_seconds": 90,
+    "cpu_autopick": true,
+    "enforce_position_limits": true,
+    "reversal_round": 0,
+    "_note": "The draft object's rounds=13 is the real value (13 x 8 = 104 picks, matching SPEC). The league-level settings.draft_rounds=3 is a stale default -- do not read it. start_time is still null, so the draft is not yet scheduled."
+  },
+
+  "_scoring_comment": "Key names are Sleeper's own, taken verbatim from the live GET /league/<id> scoring_settings on 2026-09-23, so verify_league compares them with no translation step. The five that were renamed from the original transcription (tpm<-fg3m, tf<-tech_foul, ff<-flagrant_foul, bonus_pt_40p<-bonus_40_pts, bonus_pt_50p<-bonus_50_pts) kept identical values, and the live payload has exactly these 13 keys and no others. engine/model/scoring.py maps them to readable box-score field names.",
   "scoring": {
     "pts": 1.5,
     "reb": 1.0,
@@ -29,13 +58,13 @@
     "stl": 1.0,
     "blk": 1.0,
     "to": -1.0,
-    "fg3m": 0.5,
+    "tpm": 0.5,
     "dd": 3.0,
     "td": 4.0,
-    "tech_foul": -1.0,
-    "flagrant_foul": -2.0,
-    "bonus_40_pts": 3.0,
-    "bonus_50_pts": 4.0
+    "tf": -1.0,
+    "ff": -2.0,
+    "bonus_pt_40p": 3.0,
+    "bonus_pt_50p": 4.0
   },
 
   "scoring_ambiguities": {

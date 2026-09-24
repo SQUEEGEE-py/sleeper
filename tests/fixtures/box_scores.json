@@ -1,0 +1,98 @@
+{
+  "_comment": "Golden fixtures for engine/model/scoring.py. Every expected value here was computed by hand from SPEC §4 and the weights in config/league.json, then reviewed by the user on 2026-09-23 BEFORE the test file was written. They are the reference; if scoring.py disagrees, scoring.py is wrong. Do not regenerate these from code output.",
+  "_expected_keys": "'<bonuses_stack>/<td_includes_dd>', lowercase booleans, matching config/league.json scoring_ambiguities. The league default is 'false/false'.",
+  "_base_formula": "1.5*pts + reb + ast + stl + blk - to + 0.5*fg3m - tech_foul - 2*flagrant_foul (weights are signed in config, so this is a dot product)",
+
+  "cases": [
+    {
+      "name": "plain_line",
+      "why": "Baseline. No double-double, no scoring bonus, no foul. Flag-independent.",
+      "box": { "pts": 18, "reb": 4, "ast": 3, "stl": 1, "blk": 0, "to": 2, "fg3m": 2 },
+      "hand_arithmetic": "1.5*18=27; +4+3+1+0=+8 -> 35; -2 -> 33; +0.5*2=+1 -> 34.0. One double-digit category (pts), so no bonus.",
+      "double_digit_categories": ["pts"],
+      "base": 34.0,
+      "expected": { "false/false": 34.0, "false/true": 34.0, "true/false": 34.0, "true/true": 34.0 }
+    },
+    {
+      "name": "double_double",
+      "why": "Two categories at 10+. Neither flag touches the plain dd bonus, so flag-independent.",
+      "box": { "pts": 22, "reb": 11, "ast": 4, "stl": 1, "blk": 1, "to": 3, "fg3m": 1 },
+      "hand_arithmetic": "1.5*22=33; +11+4+1+1=+17 -> 50; -3 -> 47; +0.5*1=+0.5 -> 47.5 base. pts+reb double => +3 -> 50.5.",
+      "double_digit_categories": ["pts", "reb"],
+      "base": 47.5,
+      "expected": { "false/false": 50.5, "false/true": 50.5, "true/false": 50.5, "true/true": 50.5 }
+    },
+    {
+      "name": "triple_double",
+      "why": "DISCRIMINATING for td_includes_dd, and only that flag: td alone (+4) vs td plus dd (+7).",
+      "box": { "pts": 25, "reb": 12, "ast": 11, "stl": 2, "blk": 1, "to": 5, "fg3m": 3 },
+      "hand_arithmetic": "1.5*25=37.5; +12+11+2+1=+26 -> 63.5; -5 -> 58.5; +0.5*3=+1.5 -> 60.0 base. td_includes_dd=false: +4 -> 64.0. true: +3+4=+7 -> 67.0.",
+      "double_digit_categories": ["pts", "reb", "ast"],
+      "base": 60.0,
+      "expected": { "false/false": 64.0, "false/true": 67.0, "true/false": 64.0, "true/true": 67.0 }
+    },
+    {
+      "name": "forty_point_game",
+      "why": "Clears exactly one scoring threshold, so bonuses_stack has nothing to stack. Flag-independent.",
+      "box": { "pts": 41, "reb": 6, "ast": 5, "stl": 1, "blk": 0, "to": 4, "fg3m": 5 },
+      "hand_arithmetic": "1.5*41=61.5; +6+5+1+0=+12 -> 73.5; -4 -> 69.5; +0.5*5=+2.5 -> 72.0 base. 40+ bonus +3 -> 75.0 under either stacking rule.",
+      "double_digit_categories": ["pts"],
+      "base": 72.0,
+      "expected": { "false/false": 75.0, "false/true": 75.0, "true/false": 75.0, "true/true": 75.0 }
+    },
+    {
+      "name": "fifty_point_game",
+      "why": "DISCRIMINATING for bonuses_stack, and only that flag: highest threshold only (+4) vs both (+7).",
+      "box": { "pts": 52, "reb": 8, "ast": 3, "stl": 2, "blk": 1, "to": 3, "fg3m": 7 },
+      "hand_arithmetic": "1.5*52=78; +8+3+2+1=+14 -> 92; -3 -> 89; +0.5*7=+3.5 -> 92.5 base. bonuses_stack=false: highest cleared threshold only, +4 -> 96.5. true: +3+4=+7 -> 99.5.",
+      "double_digit_categories": ["pts"],
+      "base": 92.5,
+      "expected": { "false/false": 96.5, "false/true": 96.5, "true/false": 99.5, "true/true": 99.5 }
+    },
+    {
+      "name": "technical_foul_with_double_double",
+      "why": "Exercises the negative tech weight alongside a dd. Flag-independent.",
+      "box": { "pts": 15, "reb": 10, "ast": 2, "stl": 0, "blk": 2, "to": 1, "fg3m": 0, "tech_foul": 1 },
+      "hand_arithmetic": "1.5*15=22.5; +10+2+0+2=+14 -> 36.5; -1 turnover -> 35.5; +0 threes; -1 tech -> 34.5 base. pts+reb double => +3 -> 37.5.",
+      "double_digit_categories": ["pts", "reb"],
+      "base": 34.5,
+      "expected": { "false/false": 37.5, "false/true": 37.5, "true/false": 37.5, "true/true": 37.5 }
+    },
+    {
+      "name": "flagrant_foul_quiet_line",
+      "why": "Exercises the -2 flagrant weight on a line with no bonus at all. Flag-independent.",
+      "box": { "pts": 9, "reb": 7, "ast": 1, "stl": 1, "blk": 0, "to": 2, "fg3m": 1, "flagrant_foul": 1 },
+      "hand_arithmetic": "1.5*9=13.5; +7+1+1+0=+9 -> 22.5; -2 -> 20.5; +0.5*1=+0.5 -> 21.0; -2 flagrant -> 19.0 base. No category reaches 10.",
+      "double_digit_categories": [],
+      "base": 19.0,
+      "expected": { "false/false": 19.0, "false/true": 19.0, "true/false": 19.0, "true/true": 19.0 }
+    },
+    {
+      "name": "did_not_play",
+      "why": "The all-zero line. Lock-In's no-lock fallback pays exactly this when a player sits, so it has to be 0.0 and not an error.",
+      "box": {},
+      "hand_arithmetic": "Every term is zero. 0.0.",
+      "double_digit_categories": [],
+      "base": 0.0,
+      "expected": { "false/false": 0.0, "false/true": 0.0, "true/false": 0.0, "true/true": 0.0 }
+    },
+    {
+      "name": "quadruple_double",
+      "why": "Four categories at 10+. config says quadruple_double = treat_as_td, so this must pay as a triple-double rather than crash. Tracks td_includes_dd.",
+      "box": { "pts": 20, "reb": 11, "ast": 10, "stl": 10, "blk": 1, "to": 6, "fg3m": 2 },
+      "hand_arithmetic": "1.5*20=30; +11+10+10+1=+32 -> 62; -6 -> 56; +0.5*2=+1 -> 57.0 base. Treated as td: false -> +4 = 61.0; td_includes_dd=true -> +3+4=+7 = 64.0.",
+      "double_digit_categories": ["pts", "reb", "ast", "stl"],
+      "base": 57.0,
+      "expected": { "false/false": 61.0, "false/true": 64.0, "true/false": 61.0, "true/true": 64.0 }
+    },
+    {
+      "name": "fifty_point_triple_double",
+      "why": "DISCRIMINATING for both flags at once, and the only case where all four combinations differ. A Jokic-type ceiling game: the spread from 103 to 109 is exactly what the unresolved rules are worth.",
+      "box": { "pts": 50, "reb": 10, "ast": 10, "stl": 1, "blk": 0, "to": 4, "fg3m": 6 },
+      "hand_arithmetic": "1.5*50=75; +10+10+1+0=+21 -> 96; -4 -> 92; +0.5*6=+3 -> 95.0 base. td bonus is +4 or +7; pts bonus is +4 or +7; totals 95+8, 95+11, 95+11, 95+14.",
+      "double_digit_categories": ["pts", "reb", "ast"],
+      "base": 95.0,
+      "expected": { "false/false": 103.0, "false/true": 106.0, "true/false": 106.0, "true/true": 109.0 }
+    }
+  ]
+}

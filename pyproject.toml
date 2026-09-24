@@ -5,7 +5,11 @@ description = "Decision-support tool for an 8-team Sleeper NBA Lock-In fantasy l
 requires-python = ">=3.11"
 dependencies = [
     "numpy",
-    "pandas",
+    # Pinned below 3.0: Windows Smart App Control (enforcement mode on this machine) blocks
+    # pandas 3.0.x's unsigned .pyd files for lack of reputation, so `import pandas` dies with
+    # "An Application Control policy has blocked this file". 2.x wheels are trusted and load
+    # fine. See CLAUDE.md, "Known environment traps".
+    "pandas>=2.2,<3",
     "scipy",
     "httpx",
     "pydantic",

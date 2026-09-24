@@ -35,16 +35,17 @@ ends with the user taking the action in the Sleeper app.
    accurate when written but these are mostly undocumented or fast-moving APIs. Probe first,
    then write the client.
 
-## Current state (2026-09-19)
+## Current state (2026-09-23)
 
-**M0 complete** (commit `1d14dc4`, pushed to `origin/main`). **M1 not started.**
+**M0 complete** (commit `1d14dc4`, pushed to `origin/main`). **M1 complete.** M2 not started.
 
 What exists and works:
 
 - `uv` project on Python 3.11 with the M0 deps. Run anything with `uv run python -m <module>`.
 - Repo skeleton from SPEC §1. Modules belonging to later milestones are **empty placeholder
-  files, not stubs** — `scoring.py`, `lockin.py`, `distributions.py` and friends are 0 bytes
-  on purpose. Don't mistake them for work in progress.
+  files, not stubs** — `lockin.py`, `distributions.py`, `valuation.py`, `lineup.py`,
+  `draft_sim.py`, the other `ingest/` modules and the `jobs/` entrypoints are 0 bytes on
+  purpose. Don't mistake them for work in progress. (`scoring.py` is real as of M1.)
 - `engine/ingest/sleeper.py` — typed pydantic client for the SPEC §2.1 endpoints. Every
   response is cached to disk under `data/cache/sleeper/` with a fetch timestamp; `players/nba`
   is TTL-capped at 24h. Reruns and tests never need the network.
@@ -56,42 +57,94 @@ Endpoints probed against the live API on 2026-09-17 per rule 6, using a public l
 `/drafts`, and `/players/nba` (dict keyed by player_id, ~2100 players, 2.4 MB). All match the
 shapes the spec describes.
 
+### M0 acceptance test: PASSING as of 2026-09-23
+
+`uv run python -m engine.jobs.verify_league` exits 0 against the real league —
+**National Logan League**, `league_id` `1405604996254339072`, 8 teams, 13 roster slots,
+scoring confirmed. The first run exited 1 on six mismatches; all six are now resolved and the
+resolutions are recorded in `config/league.json`'s `_*_comment` fields:
+
+- **Five scoring keys were named wrong** in the original hand transcription. Sleeper's real
+  names are `tpm`, `tf`, `ff`, `bonus_pt_40p`, `bonus_pt_50p`. **Every weight was already
+  correct** — only the spellings differed, and the live payload has exactly 13 keys with no
+  extras. `config/league.json` now stores Sleeper's spelling verbatim so `verify_league`
+  compares with no translation; `scoring.py` holds the one verified
+  `STAT_FIELD_TO_SCORING_KEY` table and the rest of the engine speaks readable field names.
+- **The league has no IR slots.** The transcription assumed 2. Confirmed twice (league
+  `roster_positions` and the draft object's `slots_*`). See "What the live league changed".
+
+### The league itself
+
+**National Logan League**, `league_id` `1405604996254339072`, draft `1405604996266901504`
+(snake, 13 rounds, 90s pick timer, `pre_draft`). The user is **`Squ33gee`, roster_id 4**. The
+other seven managers, who are the opponent models in SPEC §6.2: `tristantro`, `amancito`,
+`2jake4davis6`, `aala1aala2`, `cyapp1`, `gilbobo`, `ChickenJoe2107`.
+
+`previous_league_id` `1275683545209122816` is last season's league with the same managers.
+Nothing carries over (redraft), but its **completed draft is replayable data** — it answers
+SPEC §9.6's dress-rehearsal question and could seed per-coach priors with observed behaviour
+instead of a generic prior. Not fetched yet.
+
 ### Blockers, in priority order
 
-1. **`config/league.json` still has `league_id: "TODO_FILL_IN"`.** `verify_league` exits 1 with
-   an explicit message until it is filled in, which means the M0 acceptance test — print the
-   league name, 8 teams, the roster slots — **has never actually run against the real league.**
-   Highest-value thing to unblock; everything downstream assumes config matches reality.
-2. **Sleeper's NBA `scoring_settings` key names are unconfirmed.** The endpoint *shapes* were
-   verified with an NFL league; the NBA field names were not. So `diff_scoring` compares
-   `config/league.json`'s own key names verbatim, and reports a config key that is absent from
-   the live payload as its own distinct case rather than guessing a translation table
-   (`flagrant_foul` vs `pf_flag`, `bonus_40_pts` vs `bonus_pts_40`, etc). Expect the first real
-   run to surface name mismatches. Resolve them by reading the live payload and telling the
-   user, never by inventing a mapping.
-3. **Both `scoring_ambiguities` remain unresolved** (`bonuses_stack`, `td_includes_dd`). Per
+1. **Draft date and the user's slot are still unknown.** `start_time` is null and
+   `draft_order` is null on draft `1405604996266901504` (status `pre_draft`). Both appear as
+   soon as the commissioner schedules it. `pick_timer` is 90s, which is the budget the live
+   advisor has to beat.
+2. **Both `scoring_ambiguities` remain unresolved** (`bonuses_stack`, `td_includes_dd`). Per
    SPEC §4 the empirical fix is to recompute real week-1 box scores and diff against Sleeper's
    own totals, which is impossible before the season opens. Both branches stay behind flags.
+   Resolving them is a one-line config change, not a code change.
 
-### Next step — M1 (scoring engine)
+### What the live league changed vs docs/SPEC.md
 
-`engine/model/scoring.py` per SPEC §4, then `tests/test_scoring.py` over 8–10 hand-scored
-fixtures in `tests/fixtures/`. The parts that are easy to get wrong:
+The spec was written from screenshots and is wrong in three places, plus one thing it never
+mentioned. `config/league.json` has
+been corrected; **the spec has not been rewritten yet.**
 
-- Every weight comes from `config/league.json`. No hardcoded numbers anywhere, including in
-  the tests.
-- Both ambiguity flags honored, and the suite must pass under **both** settings of each.
-- `quadruple_double: "treat_as_td"` must not crash.
-- No network in any test.
+- **No IR slots.** SPEC §7.2's IR-stash strategy (flagging injured stars who cost no active
+  roster spot) does not apply. Delete it rather than implementing it.
+- **Waivers are FAAB**, `waiver_budget: 100`, not rolling priority. SPEC §7.3 ranks waiver
+  targets but says nothing about bid sizing, which is now a real modelling question.
+- **Two divisions**, which the spec never mentions. Check how they affect the top-4 playoff
+  cut that the draft simulator's `threat[team]` is built around.
+- **No keepers, despite `max_keepers: 1`.** That field is an inert Sleeper default here;
+  `settings.type` is 0 (redraft) and all 8 pre-draft rosters are empty. Every player is
+  draftable. Recorded in `config/league.json` so it does not get reopened from `max_keepers`
+  alone.
+- Non-issue, but do not be alarmed by it: the league-level `settings.draft_rounds` is `3`. It
+  is a stale default. The draft object's `rounds: 13` is the real value, giving the 104 picks
+  the spec assumes.
 
-A fixture set with hand-computed expected values has been drafted and is **awaiting the user's
-review** before the test file is written; the user asked to check the arithmetic first. The
-fixtures that actually discriminate between flag settings are the triple-double, the 50-point
-game, and a 50-point triple-double that exercises both flags at once. The remaining ones
-(plain line, double-double, 40-point game, tech, high-turnover, flagrant, quadruple-double)
-are flag-independent except where noted.
+### M1 — scoring engine (done)
 
-Do not start M2 until M1's acceptance test passes.
+`engine/model/scoring.py` implements SPEC §4. `uv run pytest tests/test_scoring.py` is green:
+89 tests, 10 hand-scored fixtures × both settings of both ambiguity flags, no network.
+
+How it is put together, so it does not get re-litigated:
+
+- Weights are a **signed dot product** over `config["scoring"]`. The config already carries the
+  minus signs on turnovers and fouls, so the module applies no sign of its own and hardcodes no
+  number. The only hardcoded things are basketball: the five countable categories, and that a
+  "double" is 10.
+- Points-bonus thresholds are **parsed from the config key names** (`bonus_pt_(\d+)p`), so a
+  commissioner adding `bonus_pt_60p` needs no code change. There is a test for that.
+- `load_rules` fails loudly on a missing weight, an **unrecognised** scoring key, or an unknown
+  `quadruple_double` policy. The last is validated at load time specifically so a quad-double
+  can never crash a live nightly job.
+- `score_breakdown()` returns the itemised parts for the UI's one-line "why"; `score_box()` is
+  the total. Everything downstream calls one of those two.
+- The expected values in `tests/fixtures/box_scores.json` were hand-computed and user-reviewed
+  before the test file was written. **They are the reference — if scoring.py disagrees,
+  scoring.py is wrong. Never regenerate them from code output.** No test recomputes a total
+  from the weights, since a test that reimplements the formula only proves it equals itself.
+- Verified by mutation: flipping non-stacking to pay the lowest threshold, and disabling the dd
+  bonus, each fail 5 and 8 tests respectively.
+
+### Next step — M2 (historical ingest)
+
+Per `docs/TASKS.md`. Note `pandas` is now pinned `<3` for the Smart App Control reason in
+"Known environment traps"; parquet work should confirm `pyarrow` imports before being built on.
 
 ## Stack
 
@@ -115,6 +168,22 @@ Do not start M2 until M1's acceptance test passes.
 - **Prediction market coverage is thin and uneven.** Most nights only a handful of players have
   props. Treat market data as a bonus signal that improves a projection when present, never as
   a required input.
+- **Windows Smart App Control is ON in enforcement mode on the dev machine.** It blocks
+  compiled `.pyd`/`.dll` files that are neither signed nor known-good to Microsoft's
+  reputation service, and the failure looks like
+  `ImportError: DLL load failed ... An Application Control policy has blocked this file`.
+  Reputation is **per file hash**, so a brand-new release of a package can be blocked while
+  the previous release and every other package load fine — that is exactly what happened with
+  pandas 3.0.6 (blocked) vs 2.3.3 (fine), which is why `pandas` is pinned `<3` in
+  `pyproject.toml`. If a new dependency fails to import this way, check
+  `Microsoft-Windows-CodeIntegrity/Operational` in Event Viewer for the verdict, then try a
+  slightly older release before anything drastic. **Do not suggest turning Smart App Control
+  off:** it cannot be turned back on without reinstalling Windows.
+  - Known-blocked and accepted: `_hashlib.pyd` in uv's own unsigned CPython build
+    (`AppData\Roaming\uv\python\...`). Cosmetic — `hashlib` falls back to Python's builtin
+    SHA implementations, `_ssl.pyd` loads, and HTTPS to Sleeper works. It only produces a
+    Windows toast. The clean fix, if it ever becomes worth it, is a python.org 3.11 install
+    (PSF-signed) plus `tool.uv.python-preference = "only-system"`.
 
 ## Conventions
 
