@@ -61,6 +61,16 @@ def load_logs(data_dir: Path, season: str) -> pd.DataFrame:
                 f"missing {path}. Run: uv run python -m engine.jobs.ingest_history"
             )
         frames.append(pd.read_parquet(path))
+    # The season being played, if it has started. Recency weighting then does the work of
+    # learning new roles: about 50% of a player's weight comes from the current season after
+    # 25 games, 75% after 50. Preseason is deliberately NOT included -- its minutes are not
+    # representative -- so it informs role flags, not the distribution.
+    current = data_dir / f"game_logs_{season}.parquet"
+    if current.exists():
+        current_logs = pd.read_parquet(current)
+        if len(current_logs):
+            frames.append(current_logs)
+
     logs = pd.concat(frames, ignore_index=True)
     logs["fp"] = score_game_logs(logs)
     return logs

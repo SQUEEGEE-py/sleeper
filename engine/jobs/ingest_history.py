@@ -23,6 +23,7 @@ from engine.ingest.nba_stats import (
     DATA_DIR,
     GAME_LOG_MISSING_STATS,
     REQUEST_SPACING_SECONDS,
+    ingest_current_season,
     games_per_team_per_week,
     ingest_schedule,
     ingest_season_logs,
@@ -63,6 +64,23 @@ def main() -> int:
         )
 
     print(f"\n  total {total_rows:,} game-log rows across {HISTORY_SEASONS} seasons")
+
+    # The season being played. Always refetched, unlike completed seasons -- it changes, which
+    # is the point: once games are played, recency weighting learns each player's new role on
+    # its own (about 50% of his weight after 25 games, 75% after 50), with no manual override.
+    time.sleep(REQUEST_SPACING_SECONDS)
+    current, preseason = ingest_current_season(season, args.data_dir)
+    if len(current) or len(preseason):
+        print(
+            f"\nCurrent season {season}: {len(current):,} regular-season rows, "
+            f"{len(preseason):,} preseason rows (refetched)"
+        )
+    else:
+        print(
+            f"\nCurrent season {season}: not started, no logs yet -- normal before opening "
+            f"night on {season_start}. Re-run this job once games are played; the board then "
+            f"learns new roles by itself."
+        )
 
     time.sleep(REQUEST_SPACING_SECONDS)
     games, weeks, fetched = ingest_schedule(season, args.data_dir, force=args.force)

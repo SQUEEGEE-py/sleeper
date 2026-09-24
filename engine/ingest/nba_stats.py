@@ -45,6 +45,10 @@ GAME_TYPE_PRESEASON = "001"
 GAME_TYPE_REGULAR = "002"
 GAME_TYPE_NBA_CUP_FINAL = "006"
 
+# stats.nba.com's season_type values. "Pre Season" really does have the space.
+SEASON_TYPE_REGULAR = "Regular Season"
+SEASON_TYPE_PRESEASON = "Pre Season"
+
 # Box-score columns we keep, mapped to the field names scoring.BoxScore uses. Anything not
 # listed is dropped; PlayerGameLogs returns 70+ columns and we need nine of them.
 GAME_LOG_STAT_COLUMNS: dict[str, str] = {
@@ -300,16 +304,36 @@ def _parquet_path(name: str, season: str, data_dir: Path) -> Path:
     return data_dir / f"{name}_{season}.parquet"
 
 
-def fetch_game_logs(season: str, timeout: int = REQUEST_TIMEOUT_SECONDS) -> pd.DataFrame:
-    """One season of player game logs. Network call; local only."""
+def fetch_game_logs(
+    season: str,
+    season_type: str = SEASON_TYPE_REGULAR,
+    timeout: int = REQUEST_TIMEOUT_SECONDS,
+) -> pd.DataFrame:
+    """One season of player game logs. Network call; local only.
+
+    Returns an empty frame with the right columns when the season has not started, which is
+    the normal state for the current season in September.
+    """
     from nba_api.stats.endpoints import playergamelogs
 
     response = playergamelogs.PlayerGameLogs(
         season_nullable=season,
-        season_type_nullable="Regular Season",
+        season_type_nullable=season_type,
         timeout=timeout,
     )
-    return normalize_game_logs(response.get_data_frames()[0], season)
+    raw = response.get_data_frames()[0]
+    if raw.empty:
+        columns = [
+            *GAME_LOG_ID_COLUMNS.values(),
+            *GAME_LOG_STAT_COLUMNS.values(),
+            *GAME_LOG_MISSING_STATS,
+            "season",
+            "season_type",
+        ]
+        return pd.DataFrame({column: pd.Series(dtype="object") for column in columns})
+    frame = normalize_game_logs(raw, season)
+    frame["season_type"] = season_type
+    return frame
 
 
 def fetch_schedule(
@@ -324,7 +348,10 @@ def fetch_schedule(
 
 
 def ingest_season_logs(
-    season: str, data_dir: Path = DATA_DIR, force: bool = False
+    season: str,
+    data_dir: Path = DATA_DIR,
+    force: bool = False,
+    season_type: str = SEASON_TYPE_REGULAR,
 ) -> tuple[pd.DataFrame, bool]:
     """Fetch and persist one season of logs. Returns (frame, fetched).
 
@@ -332,14 +359,38 @@ def ingest_season_logs(
     seasons never change, so re-running this job costs one call per missing season and
     nothing for the rest.
     """
-    path = _parquet_path("game_logs", season, data_dir)
+    name = "game_logs" if season_type == SEASON_TYPE_REGULAR else "preseason_logs"
+    path = _parquet_path(name, season, data_dir)
     if path.exists() and not force:
         return pd.read_parquet(path), False
 
-    frame = fetch_game_logs(season)
+    frame = fetch_game_logs(season, season_type)
     data_dir.mkdir(parents=True, exist_ok=True)
     frame.to_parquet(path, index=False)
     return frame, True
+
+
+def ingest_current_season(
+    season: str, data_dir: Path = DATA_DIR
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Regular-season and preseason logs for the season now being played.
+
+    **Always refetched**, unlike completed seasons -- the whole point is that it changes. Once
+    the season starts this is what lets the model learn a player's new role on its own:
+    recency weighting reaches 50% new-role weight after about 25 games (roughly 8 weeks) and
+    75% after 50, with no manual override needed.
+
+    Before opening night both come back empty, which is a normal state and not an error.
+    Preseason is kept in a separate file and tagged, because preseason minutes are not
+    representative -- starters play limited minutes and deep bench players play a lot -- so it
+    is a role-change *signal*, not distribution data (SPEC §2.2).
+    """
+    regular, _ = ingest_season_logs(season, data_dir, force=True)
+    time.sleep(REQUEST_SPACING_SECONDS)
+    preseason, _ = ingest_season_logs(
+        season, data_dir, force=True, season_type=SEASON_TYPE_PRESEASON
+    )
+    return regular, preseason
 
 
 def ingest_schedule(

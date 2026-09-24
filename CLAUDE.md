@@ -304,10 +304,23 @@ is built from. Re-examine the double-double-bigs exception in SPEC §6.3 first (
 
 - **Supabase is not set up.** No `.env`, so `ingest_history` writes parquet only and says so.
   TASKS M2 asks for parquet *and* Supabase; that half is deferred, not done.
-- **`config/player_overrides.csv` is wired in but empty.** Every projection currently assumes
-  last season's role. SPEC §5.1 flags the heavy 2026 offseason movement (LeBron to
-  Philadelphia among others) — those players are mispriced until someone fills the file in.
-  The plumbing and tests exist; the judgement calls do not.
+- **`config/player_overrides.csv` is wired in but empty — and mostly it should stay that
+  way.** The user's call, and it is the right one: once the season starts the model learns new
+  roles by itself, so hand-entered multipliers are only worth it for the pre-season window.
+
+  `ingest_current_season` now pulls the season being played on every run (always refetched,
+  never cached) and the board folds it in, so this happens with no further work. Recency
+  weighting at a 25-game half-life gives the current season **24% of a player's weight after
+  10 games (~3 weeks), 50% after 25 (~8 weeks), 75% after 50 (~16 weeks)**.
+
+  What that does *not* cover is **draft night itself**, which is the one time the board has to
+  be right and the one time zero current-season games exist. The available signal is
+  **preseason** — 2025-26 preseason had 2,021 rows from Oct 2-17, so a draft held days before
+  the 2026-10-20 opener has real data on who is playing where. It is ingested to a separate
+  `preseason_logs_{season}.parquet` and deliberately **kept out of the scoring distribution**,
+  because preseason minutes are not representative (starters rest, deep bench plays). Use it
+  to decide which handful of moved players deserve an override, not as distribution data.
+  Nothing yet reads that file; turning it into a role-change report is the obvious next step.
 
 ## Stack
 

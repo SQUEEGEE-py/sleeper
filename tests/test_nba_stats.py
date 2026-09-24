@@ -277,3 +277,86 @@ def test_verify_weeks_handles_an_empty_grid() -> None:
         {"week_number": [], "week_name": [], "start_date": [], "end_date": [], "season": []}
     )
     assert verify_weeks_match_fantasy_weeks(empty, SEASON_START) == ["week grid is empty"]
+
+
+# --- current season ingest ------------------------------------------------------------------
+
+
+def test_season_type_constants_match_the_endpoint() -> None:
+    """stats.nba.com spells it "Pre Season", with the space. Getting this wrong returns an
+    empty frame that looks exactly like "the season has not started"."""
+    from engine.ingest.nba_stats import SEASON_TYPE_PRESEASON, SEASON_TYPE_REGULAR
+
+    assert SEASON_TYPE_REGULAR == "Regular Season"
+    assert SEASON_TYPE_PRESEASON == "Pre Season"
+
+
+def test_empty_season_yields_a_usable_frame(monkeypatch) -> None:
+    """Before opening night the endpoint returns nothing. That is a normal state, not an
+    error, and the frame still has to carry the columns downstream code reads -- otherwise
+    every caller needs a special case for September."""
+    import engine.ingest.nba_stats as nba_stats
+    from engine.model.scoring import BoxScore
+
+    class FakeEndpoint:
+        def __init__(self, **kwargs):
+            pass
+
+        def get_data_frames(self):
+            return [pd.DataFrame()]
+
+    class FakeModule:
+        PlayerGameLogs = FakeEndpoint
+
+    monkeypatch.setitem(
+        __import__("sys").modules, "nba_api.stats.endpoints.playergamelogs", FakeModule
+    )
+    frame = nba_stats.fetch_game_logs("2026-27")
+
+    assert frame.empty
+    for field in BoxScore.model_fields:
+        assert field in frame.columns
+    assert "season" in frame.columns and "season_type" in frame.columns
+
+
+def test_ingest_season_logs_separates_preseason_files(tmp_path, monkeypatch) -> None:
+    """Preseason must not overwrite the regular-season parquet: its minutes are not
+    representative, so it is a role-change signal rather than distribution data."""
+    import engine.ingest.nba_stats as nba_stats
+    from engine.ingest.nba_stats import SEASON_TYPE_PRESEASON
+
+    def fake_fetch(season, season_type=nba_stats.SEASON_TYPE_REGULAR, timeout=60):
+        return pd.DataFrame({"season": [season], "season_type": [season_type]})
+
+    monkeypatch.setattr(nba_stats, "fetch_game_logs", fake_fetch)
+
+    regular, _ = nba_stats.ingest_season_logs("2026-27", tmp_path, force=True)
+    preseason, _ = nba_stats.ingest_season_logs(
+        "2026-27", tmp_path, force=True, season_type=SEASON_TYPE_PRESEASON
+    )
+
+    assert (tmp_path / "game_logs_2026-27.parquet").exists()
+    assert (tmp_path / "preseason_logs_2026-27.parquet").exists()
+    assert regular.iloc[0]["season_type"] == "Regular Season"
+    assert preseason.iloc[0]["season_type"] == SEASON_TYPE_PRESEASON
+
+
+def test_current_season_is_always_refetched(tmp_path, monkeypatch) -> None:
+    """Completed seasons are cached; the season being played is not. If it were cached, the
+    board would never pick up the new roles it exists to learn."""
+    import engine.ingest.nba_stats as nba_stats
+
+    calls = []
+
+    def fake_fetch(season, season_type=nba_stats.SEASON_TYPE_REGULAR, timeout=60):
+        calls.append(season_type)
+        return pd.DataFrame({"season": [season], "season_type": [season_type]})
+
+    monkeypatch.setattr(nba_stats, "fetch_game_logs", fake_fetch)
+    monkeypatch.setattr(nba_stats.time, "sleep", lambda seconds: None)
+
+    nba_stats.ingest_current_season("2026-27", tmp_path)
+    nba_stats.ingest_current_season("2026-27", tmp_path)
+
+    assert calls.count("Regular Season") == 2
+    assert calls.count("Pre Season") == 2
