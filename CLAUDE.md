@@ -37,15 +37,16 @@ ends with the user taking the action in the Sleeper app.
 
 ## Current state (2026-09-23)
 
-**M0, M1 and M2 complete.** M3 not started.
+**M0, M1, M2 and M3 complete.** M4 not started — that is the one that must ship before the draft.
 
 What exists and works:
 
 - `uv` project on Python 3.11 with the M0 deps. Run anything with `uv run python -m <module>`.
 - Repo skeleton from SPEC §1. Modules belonging to later milestones are **empty placeholder
   files, not stubs** — `lockin.py`, `distributions.py`, `valuation.py`, `lineup.py`,
-  `draft_sim.py`, the other `ingest/` modules and the `jobs/` entrypoints are 0 bytes on
-  purpose. Don't mistake them for work in progress. (`scoring.py` is real as of M1.)
+  `draft_sim.py`, the other `ingest/` modules and the remaining `jobs/` entrypoints are 0
+  bytes on purpose. Don't mistake them for work in progress. Real so far: `scoring.py` (M1),
+  `nba_stats.py` (M2), `distributions.py` and `lockin.py` (M3).
 - `engine/ingest/sleeper.py` — typed pydantic client for the SPEC §2.1 endpoints. Every
   response is cached to disk under `data/cache/sleeper/` with a fetch timestamp; `players/nba`
   is TTL-capped at 24h. Reruns and tests never need the network.
@@ -178,13 +179,69 @@ the shape this scoring system should produce. And **Jokić is the player most af
 two unresolved ambiguity flags** (+1.66 fp/game between the extremes), which is precisely what
 SPEC §4 predicted.
 
-### Next step — M3 (distributions and lock-in value)
+### M3 — distributions and lock-in value (done)
 
-Per `docs/TASKS.md`. The regression target is in "Testing" below. Everything M3 needs is now
-on disk; it should not need the network at all.
+`engine/model/distributions.py` + `engine/model/lockin.py`, driven by
+`uv run python -m engine.jobs.player_value "<name>" [--compare ...]`. 56 tests, no network.
 
-**Supabase is not set up.** There is no `.env`, so `ingest_history` writes parquet only and
-says so. TASKS M2 asks for parquet *and* Supabase; the Supabase half is deferred, not done.
+**The closed-form regression passes exactly**: normal(45, 10) gives 45.000 / 48.989 / 51.297 /
+52.904 for 1-4 game weeks against the 45.0 / 49.0 / 51.3 / 52.9 target, and a 200k-draw
+simulation through the empirical path reproduces it to within 0.15. Both paths are tested,
+because the analytic one alone would only prove the normal formula matches itself.
+
+Design notes worth keeping:
+
+- **`lockin.py` is pure and distribution-agnostic.** It takes anything satisfying the
+  `ScoreDistribution` protocol (`p_play`, `mean()`, `expected_max(c)`). Two implementations:
+  an analytic normal for the regression and for reasoning, and a weighted empirical sample for
+  real players. The conditional distribution is deliberately **not** fitted to a normal -- the
+  40+/50+ bonuses live in the right tail and a normal would smooth them away.
+- **The terminal game is E[X_n], not E[max(X_n, 0)].** There is no decision left at the last
+  game, and scores can be negative (no points, three turnovers). Running the general recursion
+  at the terminal step would quietly assume the auto-lock fallback protects you from a
+  negative. It does not. There is a mutation-tested case for this.
+- **`p_play` is measured per team stint**, so a traded player is not charged for both teams'
+  full seasons. The honest limit, documented in the docstring: each window starts at his first
+  appearance, so games missed at the very start or end of a stint are invisible. It is a base
+  rate for in-stint availability; injury designations adjust it at decision time.
+- **Recency weighting is by rank, not elapsed time** (half-life 25 games). A player who missed
+  three weeks injured has not become three weeks staler than his last game suggests.
+- **Shrinkage toward a minutes-band role prior** is what stops a six-game sample producing a
+  confident number. `history_reliable` flags anyone under 20 games for SPEC §5.3's
+  unreliable-history column.
+
+Verified by mutation, like M1: using the general recursion at the terminal step, dropping
+`p_play` from the roll-on branch, and an off-by-one in the thresholds each fail the suite (1,
+4 and 12 tests respectively).
+
+### M3 spot checks, on real data
+
+Both of `docs/TASKS.md` M3's eyeball tests hold:
+
+- **Volatility beats a higher mean.** Anthony Edwards (mean 52.5, sd 17.4) outranks Jaylen
+  Brown (mean 52.8, sd 13.9) on season value despite the lower mean. Wembanyama (58.6/17.6)
+  outranks SGA (58.5/13.6) despite worse availability. At a fixed mean of 45 in a 3-game week,
+  sd 8 -> 50.04 and sd 20 -> 57.59.
+- **Missed games are cheap.** Kawhi Leonard misses 16.3% of games and loses only **6.5%** of
+  season value; Jokic misses 13.0% and loses 5.3%; Gobert misses 7.8% and loses 3.3%. Across
+  the board the value loss runs at roughly **40% of the games-missed rate** -- which is the
+  whole reason rest-prone stars are underpriced by drafters using standard rankings.
+
+### Next step — M4 (the board, phase 1 deliverable)
+
+Per `docs/TASKS.md` — `lineup.py`, `valuation.py`, `build_board.py`, and
+`config/player_overrides.csv`. This is the one that has to ship before the draft. Note the
+season-value machinery already exists (`lockin.season_value` over the team x week grid); M4 is
+slot-specific replacement level and VOR on top of it.
+
+**Two things still owed from earlier milestones:**
+
+- **Supabase is not set up.** No `.env`, so `ingest_history` writes parquet only and says so.
+  TASKS M2 asks for parquet *and* Supabase; that half is deferred, not done.
+- **`config/player_overrides.csv` does not exist yet.** SPEC §5.1 needs it for the heavy 2026
+  offseason movement (LeBron to Philadelphia among others) -- historical distributions
+  misjudge anyone whose role changed, and rookies have no usable history at all. M4 wires it
+  in. Until then, every projection assumes last season's role.
 
 ## Stack
 
