@@ -7,3 +7,4 @@ __pycache__/
 data/cache/
 *.egg-info/
 data/nba/
+data/board/

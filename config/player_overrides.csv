@@ -1,0 +1,14 @@
+# Manual overrides. Two jobs, because both mean "the automated answer is wrong for him".
+#
+# 1. IDENTITY -- set sleeper_id when the name match fails. Run build_board; any unmapped or
+#    ambiguous player is printed with his nba_player_id. Never guess a mapping; look it up.
+# 2. PROJECTION -- value_multiplier scales his score distribution, p_play overrides his
+#    availability. SPEC 5.1: history misjudges anyone whose role changed, and the 2026
+#    offseason moved a lot of people. A rookie has no history at all.
+#
+# value_multiplier is a blunt instrument: 1.15 means "about 15% more production per game than
+# his history says". Prefer leaving it at 1.0 unless there is a concrete reason, and put the
+# reason in note. Blank cells mean "no override".
+#
+# name is required; fill only the columns you are actually overriding.
+name,nba_player_id,sleeper_id,value_multiplier,p_play,note

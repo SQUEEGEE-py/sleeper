@@ -37,16 +37,17 @@ ends with the user taking the action in the Sleeper app.
 
 ## Current state (2026-09-23)
 
-**M0, M1, M2 and M3 complete.** M4 not started — that is the one that must ship before the draft.
+**M0 through M4 complete — the pre-draft board ships.** M5 (live draft assistant) not started.
 
 What exists and works:
 
 - `uv` project on Python 3.11 with the M0 deps. Run anything with `uv run python -m <module>`.
 - Repo skeleton from SPEC §1. Modules belonging to later milestones are **empty placeholder
   files, not stubs** — `lockin.py`, `distributions.py`, `valuation.py`, `lineup.py`,
-  `draft_sim.py`, the other `ingest/` modules and the remaining `jobs/` entrypoints are 0
-  bytes on purpose. Don't mistake them for work in progress. Real so far: `scoring.py` (M1),
-  `nba_stats.py` (M2), `distributions.py` and `lockin.py` (M3).
+  `draft_sim.py`, `matchup.py`, the market/news `ingest/` modules and `draft_live.py` /
+  `nightly.py` are 0 bytes on purpose. Don't mistake them for work in progress. Real so far:
+  `scoring.py` (M1), `nba_stats.py` (M2), `distributions.py` and `lockin.py` (M3),
+  `player_ids.py`, `lineup.py`, `valuation.py` and `build_board.py` (M4).
 - `engine/ingest/sleeper.py` — typed pydantic client for the SPEC §2.1 endpoints. Every
   response is cached to disk under `data/cache/sleeper/` with a fetch timestamp; `players/nba`
   is TTL-capped at 24h. Reruns and tests never need the network.
@@ -227,21 +228,86 @@ Both of `docs/TASKS.md` M3's eyeball tests hold:
   the board the value loss runs at roughly **40% of the games-missed rate** -- which is the
   whole reason rest-prone stars are underpriced by drafters using standard rankings.
 
-### Next step — M4 (the board, phase 1 deliverable)
+### M4 — the draft board (done) 🎯
 
-Per `docs/TASKS.md` — `lineup.py`, `valuation.py`, `build_board.py`, and
-`config/player_overrides.csv`. This is the one that has to ship before the draft. Note the
-season-value machinery already exists (`lockin.season_value` over the team x week grid); M4 is
-slot-specific replacement level and VOR on top of it.
+`uv run python -m engine.jobs.build_board [--top 120]` writes `data/board/board.csv` and
+`data/board/board.html` (gitignored, regenerable). 62 tests.
 
-**Two things still owed from earlier milestones:**
+**The HTML page is fully self-contained** — 39 KB, zero external references, no fetch, no CDN,
+no web fonts, dark mode, sticky header, client-side filter and sort. Verified by scanning the
+output for any `src`/`href` leaving the file. That is its whole job: to still work on a phone
+in the draft room when the wifi or the live advisor has died.
+
+Pieces: `engine/ingest/player_ids.py` (identity), `engine/model/lineup.py` (slot assignment),
+`engine/model/valuation.py` (replacement level and VOR), `engine/jobs/build_board.py`.
+
+- **Player identity: 506/506 mapped, no gaps.** Sleeper's NBA dictionary has no NBA.com id
+  (it has sportradar, swish, rotowire, kalshi — not this one), so the join is by name.
+  Normalising accents, punctuation and generational suffixes, then breaking ties by team, maps
+  everyone. Unmapped and ambiguous players are returned and printed and shown on the board,
+  never dropped. Manual fixes go in `config/player_overrides.csv`.
+- **`lineup.py` is exact, not greedy** — `scipy.optimize.linear_sum_assignment`. There is a
+  test for the case greedy gets wrong: a flexible player taking the only C slot and stranding
+  a better pure centre on the bench.
+- **Shrinkage toward a minutes-band role prior is wired in, and it mattered.** Without it the
+  board filled with volatile low-minute rookies, because Lock-In rewards variance and a thin
+  sample is almost all variance. With it, thin-history players in the top 120 dropped to 2,
+  none in the top 50, and mean minutes of the top 120 is 30.9.
+
+#### The replacement-level trap (do not undo this)
+
+Everyone is UTIL-eligible and the greedy fills UTIL last, so **the marginal UTIL starter is
+structurally the weakest starter in the league**. Taking the minimum replacement across all of
+a player's eligible slots therefore hands every single player the UTIL number, and VOR
+collapses to "season value minus a constant" — the flat player-number-72 cutoff SPEC §5.3
+explicitly forbids. The first build did exactly this: all 120 rows shared one replacement
+value.
+
+`replacement_for` now excludes UTIL from that minimum, so a player is measured against his
+dedicated positional slots. `test_vor_is_not_a_flat_cutoff` guards it. The three resulting
+bars are the marginal starter in each position family: **centres 40.1** (16 jobs),
+**forwards 41.4** (24 jobs), **guards 42.5** (24 jobs).
+
+#### M4's eyeball tests: two pass, one is wrong in the spec
+
+Measured by re-scoring 2025-26 with individual scoring rules switched off, which isolates each
+mechanism instead of comparing against an arbitrary baseline:
+
+- ✅ **Defensive specialists rank lower.** Clearest effect in the whole board. Top-quintile
+  steals+blocks share shifts −14.9 rank places against a conventional points league; bottom
+  quintile +6.2. Steals and blocks are worth 1 here against 2 almost everywhere else.
+- ✅ **The double-double bonus does lift double-double bigs.** Turning `dd`/`td` off moves
+  centres −1.4 and 40%+ double-double centres −2.9; correlation between double-double rate and
+  the shift is **+0.476**. The mechanism works exactly as SPEC §6.3 describes.
+- ❌ **But centres still do not out-rank standard fantasy, because the 1.5x points multiplier
+  is much larger than the double-double bonus.** Turning the multiplier and the 40+/50+
+  bonuses off moves centres **−4.9** and 40%+ double-double centres **−8.1**, against +2.1 for
+  non-centres; correlation with points per game **+0.176**. The +3 bonus is worth about +1.5 a
+  game to a big who doubles half the time, while 1.5x turns a 25-point scorer's 25 into 37.5
+  and a 10-point centre's into 15 — a far bigger differential. Net across the full 506-player
+  universe, centres sit **−3.6** rank places against a conventional baseline, not above it.
+
+  **Consequences.** `docs/TASKS.md` M4's eyeball expectation ("centres with reliable
+  double-doubles rank above where standard fantasy rankings put them") is half right: the
+  bonus helps them, the scoring system as a whole does not. And SPEC §6.3 names "reliable
+  double-double bigs" as one of two places where denial is genuinely large — that exception
+  rests on a premium the data does not support, so it should be re-examined before M5 builds
+  blocking policy on it. Centre *scarcity* is real and is captured by the replacement level
+  (40.1, the lowest bar); centre *production* is not specially rewarded here.
+
+### Next step — M5 (live draft assistant, phase 2)
+
+Per `docs/TASKS.md`. `lineup.marginal_value_to_roster` already computes the quantity `denial`
+is built from. Re-examine the double-double-bigs exception in SPEC §6.3 first (above).
+
+**Still owed from earlier milestones:**
 
 - **Supabase is not set up.** No `.env`, so `ingest_history` writes parquet only and says so.
   TASKS M2 asks for parquet *and* Supabase; that half is deferred, not done.
-- **`config/player_overrides.csv` does not exist yet.** SPEC §5.1 needs it for the heavy 2026
-  offseason movement (LeBron to Philadelphia among others) -- historical distributions
-  misjudge anyone whose role changed, and rookies have no usable history at all. M4 wires it
-  in. Until then, every projection assumes last season's role.
+- **`config/player_overrides.csv` is wired in but empty.** Every projection currently assumes
+  last season's role. SPEC §5.1 flags the heavy 2026 offseason movement (LeBron to
+  Philadelphia among others) — those players are mispriced until someone fills the file in.
+  The plumbing and tests exist; the judgement calls do not.
 
 ## Stack
 
