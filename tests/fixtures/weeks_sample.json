@@ -1,0 +1,210 @@
+[
+  {
+    "leagueId":"00",
+    "seasonYear":"2026-27",
+    "weekNumber":1,
+    "weekName":"Week 1",
+    "startDate":"2026-10-20T00:00:00Z",
+    "endDate":"2026-10-25T00:00:00Z"
+  },
+  {
+    "leagueId":"00",
+    "seasonYear":"2026-27",
+    "weekNumber":2,
+    "weekName":"Week 2",
+    "startDate":"2026-10-26T00:00:00Z",
+    "endDate":"2026-11-01T00:00:00Z"
+  },
+  {
+    "leagueId":"00",
+    "seasonYear":"2026-27",
+    "weekNumber":3,
+    "weekName":"Week 3",
+    "startDate":"2026-11-02T00:00:00Z",
+    "endDate":"2026-11-08T00:00:00Z"
+  },
+  {
+    "leagueId":"00",
+    "seasonYear":"2026-27",
+    "weekNumber":4,
+    "weekName":"Week 4",
+    "startDate":"2026-11-09T00:00:00Z",
+    "endDate":"2026-11-15T00:00:00Z"
+  },
+  {
+    "leagueId":"00",
+    "seasonYear":"2026-27",
+    "weekNumber":5,
+    "weekName":"Week 5",
+    "startDate":"2026-11-16T00:00:00Z",
+    "endDate":"2026-11-22T00:00:00Z"
+  },
+  {
+    "leagueId":"00",
+    "seasonYear":"2026-27",
+    "weekNumber":6,
+    "weekName":"Week 6",
+    "startDate":"2026-11-23T00:00:00Z",
+    "endDate":"2026-11-29T00:00:00Z"
+  },
+  {
+    "leagueId":"00",
+    "seasonYear":"2026-27",
+    "weekNumber":7,
+    "weekName":"Week 7",
+    "startDate":"2026-11-30T00:00:00Z",
+    "endDate":"2026-12-06T00:00:00Z"
+  },
+  {
+    "leagueId":"00",
+    "seasonYear":"2026-27",
+    "weekNumber":8,
+    "weekName":"Week 8",
+    "startDate":"2026-12-07T00:00:00Z",
+    "endDate":"2026-12-13T00:00:00Z"
+  },
+  {
+    "leagueId":"00",
+    "seasonYear":"2026-27",
+    "weekNumber":9,
+    "weekName":"Week 9",
+    "startDate":"2026-12-14T00:00:00Z",
+    "endDate":"2026-12-20T00:00:00Z"
+  },
+  {
+    "leagueId":"00",
+    "seasonYear":"2026-27",
+    "weekNumber":10,
+    "weekName":"Week 10",
+    "startDate":"2026-12-21T00:00:00Z",
+    "endDate":"2026-12-27T00:00:00Z"
+  },
+  {
+    "leagueId":"00",
+    "seasonYear":"2026-27",
+    "weekNumber":11,
+    "weekName":"Week 11",
+    "startDate":"2026-12-28T00:00:00Z",
+    "endDate":"2027-01-03T00:00:00Z"
+  },
+  {
+    "leagueId":"00",
+    "seasonYear":"2026-27",
+    "weekNumber":12,
+    "weekName":"Week 12",
+    "startDate":"2027-01-04T00:00:00Z",
+    "endDate":"2027-01-10T00:00:00Z"
+  },
+  {
+    "leagueId":"00",
+    "seasonYear":"2026-27",
+    "weekNumber":13,
+    "weekName":"Week 13",
+    "startDate":"2027-01-11T00:00:00Z",
+    "endDate":"2027-01-17T00:00:00Z"
+  },
+  {
+    "leagueId":"00",
+    "seasonYear":"2026-27",
+    "weekNumber":14,
+    "weekName":"Week 14",
+    "startDate":"2027-01-18T00:00:00Z",
+    "endDate":"2027-01-24T00:00:00Z"
+  },
+  {
+    "leagueId":"00",
+    "seasonYear":"2026-27",
+    "weekNumber":15,
+    "weekName":"Week 15",
+    "startDate":"2027-01-25T00:00:00Z",
+    "endDate":"2027-01-31T00:00:00Z"
+  },
+  {
+    "leagueId":"00",
+    "seasonYear":"2026-27",
+    "weekNumber":16,
+    "weekName":"Week 16",
+    "startDate":"2027-02-01T00:00:00Z",
+    "endDate":"2027-02-07T00:00:00Z"
+  },
+  {
+    "leagueId":"00",
+    "seasonYear":"2026-27",
+    "weekNumber":17,
+    "weekName":"Week 17",
+    "startDate":"2027-02-08T00:00:00Z",
+    "endDate":"2027-02-14T00:00:00Z"
+  },
+  {
+    "leagueId":"00",
+    "seasonYear":"2026-27",
+    "weekNumber":18,
+    "weekName":"Week 18",
+    "startDate":"2027-02-15T00:00:00Z",
+    "endDate":"2027-02-21T00:00:00Z"
+  },
+  {
+    "leagueId":"00",
+    "seasonYear":"2026-27",
+    "weekNumber":19,
+    "weekName":"Week 19",
+    "startDate":"2027-02-22T00:00:00Z",
+    "endDate":"2027-02-28T00:00:00Z"
+  },
+  {
+    "leagueId":"00",
+    "seasonYear":"2026-27",
+    "weekNumber":20,
+    "weekName":"Week 20",
+    "startDate":"2027-03-01T00:00:00Z",
+    "endDate":"2027-03-07T00:00:00Z"
+  },
+  {
+    "leagueId":"00",
+    "seasonYear":"2026-27",
+    "weekNumber":21,
+    "weekName":"Week 21",
+    "startDate":"2027-03-08T00:00:00Z",
+    "endDate":"2027-03-14T00:00:00Z"
+  },
+  {
+    "leagueId":"00",
+    "seasonYear":"2026-27",
+    "weekNumber":22,
+    "weekName":"Week 22",
+    "startDate":"2027-03-15T00:00:00Z",
+    "endDate":"2027-03-21T00:00:00Z"
+  },
+  {
+    "leagueId":"00",
+    "seasonYear":"2026-27",
+    "weekNumber":23,
+    "weekName":"Week 23",
+    "startDate":"2027-03-22T00:00:00Z",
+    "endDate":"2027-03-28T00:00:00Z"
+  },
+  {
+    "leagueId":"00",
+    "seasonYear":"2026-27",
+    "weekNumber":24,
+    "weekName":"Week 24",
+    "startDate":"2027-03-29T00:00:00Z",
+    "endDate":"2027-04-04T00:00:00Z"
+  },
+  {
+    "leagueId":"00",
+    "seasonYear":"2026-27",
+    "weekNumber":25,
+    "weekName":"Week 25",
+    "startDate":"2027-04-05T00:00:00Z",
+    "endDate":"2027-04-11T00:00:00Z"
+  },
+  {
+    "leagueId":"00",
+    "seasonYear":"2026-27",
+    "weekNumber":8,
+    "weekName":"Week 8",
+    "startDate":"2026-12-07T00:00:00Z",
+    "endDate":"2026-12-13T00:00:00Z"
+  }
+]

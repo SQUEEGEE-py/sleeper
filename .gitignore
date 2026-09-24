@@ -6,3 +6,4 @@ __pycache__/
 .cache/
 data/cache/
 *.egg-info/
+data/nba/

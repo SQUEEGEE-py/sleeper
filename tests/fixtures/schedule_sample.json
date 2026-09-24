@@ -1,0 +1,114 @@
+[
+  {
+    "gameId":"0012600009",
+    "gameDate":"10\/03\/2026 00:00:00",
+    "weekNumber":0,
+    "homeTeam_teamTricode":"TOR",
+    "awayTeam_teamTricode":"MIA"
+  },
+  {
+    "gameId":"0012600066",
+    "gameDate":"10\/04\/2026 00:00:00",
+    "weekNumber":0,
+    "homeTeam_teamTricode":"LAC",
+    "awayTeam_teamTricode":"GSW"
+  },
+  {
+    "gameId":"0022600001",
+    "gameDate":"10\/20\/2026 00:00:00",
+    "weekNumber":1,
+    "homeTeam_teamTricode":"DET",
+    "awayTeam_teamTricode":"BOS"
+  },
+  {
+    "gameId":"0022600002",
+    "gameDate":"10\/20\/2026 00:00:00",
+    "weekNumber":1,
+    "homeTeam_teamTricode":"NYK",
+    "awayTeam_teamTricode":"PHI"
+  },
+  {
+    "gameId":"0022600119",
+    "gameDate":"10\/26\/2026 00:00:00",
+    "weekNumber":2,
+    "homeTeam_teamTricode":"CHA",
+    "awayTeam_teamTricode":"WAS"
+  },
+  {
+    "gameId":"0022600120",
+    "gameDate":"10\/26\/2026 00:00:00",
+    "weekNumber":2,
+    "homeTeam_teamTricode":"CLE",
+    "awayTeam_teamTricode":"MIN"
+  },
+  {
+    "gameId":"0022600158",
+    "gameDate":"11\/02\/2026 00:00:00",
+    "weekNumber":3,
+    "homeTeam_teamTricode":"CLE",
+    "awayTeam_teamTricode":"OKC"
+  },
+  {
+    "gameId":"0022600159",
+    "gameDate":"11\/02\/2026 00:00:00",
+    "weekNumber":3,
+    "homeTeam_teamTricode":"CHA",
+    "awayTeam_teamTricode":"DET"
+  },
+  {
+    "gameId":"0022600203",
+    "gameDate":"11\/09\/2026 00:00:00",
+    "weekNumber":4,
+    "homeTeam_teamTricode":"ATL",
+    "awayTeam_teamTricode":"LAL"
+  },
+  {
+    "gameId":"0022600204",
+    "gameDate":"11\/09\/2026 00:00:00",
+    "weekNumber":4,
+    "homeTeam_teamTricode":"CHA",
+    "awayTeam_teamTricode":"CLE"
+  },
+  {
+    "gameId":"0022600245",
+    "gameDate":"11\/16\/2026 00:00:00",
+    "weekNumber":5,
+    "homeTeam_teamTricode":"BOS",
+    "awayTeam_teamTricode":"ORL"
+  },
+  {
+    "gameId":"0022600246",
+    "gameDate":"11\/16\/2026 00:00:00",
+    "weekNumber":5,
+    "homeTeam_teamTricode":"CLE",
+    "awayTeam_teamTricode":"CHI"
+  },
+  {
+    "gameId":"0022600287",
+    "gameDate":"11\/23\/2026 00:00:00",
+    "weekNumber":6,
+    "homeTeam_teamTricode":"CHA",
+    "awayTeam_teamTricode":"MEM"
+  },
+  {
+    "gameId":"0022600288",
+    "gameDate":"11\/23\/2026 00:00:00",
+    "weekNumber":6,
+    "homeTeam_teamTricode":"PHI",
+    "awayTeam_teamTricode":"POR"
+  },
+  {
+    "gameId":"0022601201",
+    "gameDate":"12\/04\/2026 00:00:00",
+    "weekNumber":7,
+    "homeTeam_teamTricode":null,
+    "awayTeam_teamTricode":null
+  },
+  {
+    "gameId":"0022601202",
+    "gameDate":"12\/04\/2026 00:00:00",
+    "weekNumber":7,
+    "homeTeam_teamTricode":null,
+    "awayTeam_teamTricode":null
+  }
+]

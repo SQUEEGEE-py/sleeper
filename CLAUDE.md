@@ -37,7 +37,7 @@ ends with the user taking the action in the Sleeper app.
 
 ## Current state (2026-09-23)
 
-**M0 complete** (commit `1d14dc4`, pushed to `origin/main`). **M1 complete.** M2 not started.
+**M0, M1 and M2 complete.** M3 not started.
 
 What exists and works:
 
@@ -141,10 +141,50 @@ How it is put together, so it does not get re-litigated:
 - Verified by mutation: flipping non-stacking to pay the lowest threshold, and disabling the dd
   bonus, each fail 5 and 8 tests respectively.
 
-### Next step — M2 (historical ingest)
+### M2 — historical ingest (done)
 
-Per `docs/TASKS.md`. Note `pandas` is now pinned `<3` for the Smart App Control reason in
-"Known environment traps"; parquet work should confirm `pyarrow` imports before being built on.
+`engine/ingest/nba_stats.py` + `engine/jobs/ingest_history.py`. Run it by hand:
+`uv run python -m engine.jobs.ingest_history [--force]`. 22 tests, no network.
+
+On disk after a run (all gitignored and regenerable): **79,358 game-log rows** across 2023-24,
+2024-25 and 2025-26, plus the 2026-27 schedule, week grid, and the team x week games grid that
+M2's acceptance test asks for.
+
+What was learned building it, so it is not rediscovered:
+
+- **cdn.nba.com is blocked from this machine** (Akamai 403, with and without browser headers),
+  so SPEC §2.2's lighter-weight schedule source is unavailable. stats.nba.com works fine and
+  supplies both the logs and, via `ScheduleLeagueV2`, the schedule and week grid.
+- **The NBA's own week numbering IS this league's fantasy week numbering** — week 1 starts
+  2026-10-20 matching config `season_start`, every later week runs Monday to Sunday, 25 weeks
+  covering the week-22 fantasy playoffs. This is load-bearing for M3, so it is *verified at
+  ingest time* by `verify_weeks_match_fantasy_weeks`, which fails the job rather than
+  assuming. Do not replace it with a hand-rolled week calculation.
+- **Two real data quirks, both fixture-tested.** `gameDate` is a US-format string, so sorting
+  it as text puts January before December and corrupts every week assignment. And the week
+  frame arrives unsorted with week 8 listed twice, identically — identical rows are collapsed,
+  but rows that disagree about a week's dates are deliberately left to fail the verifier.
+- **Two games per team are unscheduled** (6 placeholder rows with both sides TBD, plus 24
+  games not yet listed; every team has 80 of 82). NBA Cup. `schedule_completeness()` reports
+  it and the job prints it. Games-per-week in that window is a floor, not a count — which
+  matters because games per week feeds lock-in value directly.
+- **Technicals and flagrants are not in `PlayerGameLogs`.** The league scores them; the
+  endpoint only has personal fouls. Stored as 0.0 and listed in `GAME_LOG_MISSING_STATS` so
+  the UI can mark them unmeasured. Recovering them needs play-by-play.
+
+Sanity check, rescoring real 2025-26 logs through `scoring.py`: the top of the board is
+Dončić 68.9, Jokić 67.8, SGA 59.1, Wembanyama 57.0 mean fp/game, league mean 23.3 — exactly
+the shape this scoring system should produce. And **Jokić is the player most affected by the
+two unresolved ambiguity flags** (+1.66 fp/game between the extremes), which is precisely what
+SPEC §4 predicted.
+
+### Next step — M3 (distributions and lock-in value)
+
+Per `docs/TASKS.md`. The regression target is in "Testing" below. Everything M3 needs is now
+on disk; it should not need the network at all.
+
+**Supabase is not set up.** There is no `.env`, so `ingest_history` writes parquet only and
+says so. TASKS M2 asks for parquet *and* Supabase; the Supabase half is deferred, not done.
 
 ## Stack
 
