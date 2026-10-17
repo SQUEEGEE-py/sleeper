@@ -35,22 +35,28 @@ ends with the user taking the action in the Sleeper app.
    accurate when written but these are mostly undocumented or fast-moving APIs. Probe first,
    then write the client.
 
-## Current state (2026-09-23)
+## Current state (2026-10-16)
 
-**M0 through M4 complete — the pre-draft board ships.** M5 (live draft assistant) not started.
+**M0 through M4 complete — the pre-draft board ships**, now including rookies and stars who
+missed last season (see "Pre-draft board fixes" below). **The draft is Sunday 2026-10-18 at
+18:00 local.** M5 (live draft assistant) not started; a cut-down version is the next job.
 
 Everything runnable today, in the order you would use it:
 
 ```
-uv run pytest                                             # 229 tests, none need the network
+uv run pytest                                             # 243 tests, none need the network
 uv run python -m engine.jobs.verify_league                # config vs live Sleeper; exits 1 on drift
 uv run python -m engine.jobs.ingest_history [--force]     # LOCAL ONLY: logs + schedule -> parquet
-uv run python -m engine.jobs.build_board [--top 120]      # -> data/board/board.{csv,html}
+uv run python -m engine.jobs.build_board [--top 150]      # -> data/board/board.{csv,html}
 uv run python -m engine.jobs.player_value "Jokic" [--compare "Kawhi" ...]
 ```
 
 Per-file test counts: scoring 89, lockin 29, distributions 27, nba_stats 26, lineup 25,
-player_ids 22, valuation 11.
+player_ids 22, rookies 14, valuation 11.
+
+`data/` is gitignored and regenerable. **On a fresh checkout run `ingest_history` then
+`build_board` before anything else** -- the 2026-10-16 session started with no `data/` at all.
+Rebuild the board on draft day to pick up Sleeper injury statuses.
 
 What exists and works:
 
@@ -60,7 +66,8 @@ What exists and works:
   `draft_sim.py`, `matchup.py`, the market/news `ingest/` modules and `draft_live.py` /
   `nightly.py` are 0 bytes on purpose. Don't mistake them for work in progress. Real so far:
   `scoring.py` (M1), `nba_stats.py` (M2), `distributions.py` and `lockin.py` (M3),
-  `player_ids.py`, `lineup.py`, `valuation.py` and `build_board.py` (M4).
+  `player_ids.py`, `lineup.py`, `valuation.py` and `build_board.py` (M4), `rookies.py`
+(pre-draft fixes).
 - `engine/ingest/sleeper.py` — typed pydantic client for the SPEC §2.1 endpoints. Every
   response is cached to disk under `data/cache/sleeper/` with a fetch timestamp; `players/nba`
   is TTL-capped at 24h. Reruns and tests never need the network.
@@ -102,10 +109,11 @@ instead of a generic prior. Not fetched yet.
 
 ### Blockers, in priority order
 
-1. **Draft date and the user's slot are still unknown.** `start_time` is null and
-   `draft_order` is null on draft `1405604996266901504` (status `pre_draft`). Both appear as
-   soon as the commissioner schedules it. `pick_timer` is 90s, which is the budget the live
-   advisor has to beat.
+1. **The user's draft slot is still unknown.** The draft is scheduled (`start_time` =
+   2026-10-18 18:00 local) but `draft_order` is still null as of 2026-10-16. The commissioner
+   may randomise it at draft time, so the live advisor must work without knowing the slot in
+   advance and pick it up from the first picks. `pick_timer` is 90s, which is the budget the
+   live advisor has to beat.
 2. **Both `scoring_ambiguities` remain unresolved** (`bonuses_stack`, `td_includes_dd`). Per
    SPEC §4 the empirical fix is to recompute real week-1 box scores and diff against Sleeper's
    own totals, which is impossible before the season opens. Both branches stay behind flags.
@@ -315,12 +323,9 @@ mechanism instead of comparing against an arbitrary baseline:
   blocking policy on it. Centre *scarcity* is real and is captured by the replacement level
   (40.1, the lowest bar); centre *production* is not specially rewarded here.
 
-### Next step — M5 (live draft assistant, phase 2)
+### Still owed from earlier milestones
 
-Per `docs/TASKS.md`. `lineup.marginal_value_to_roster` already computes the quantity `denial`
-is built from. Re-examine the double-double-bigs exception in SPEC §6.3 first (above).
-
-**Still owed from earlier milestones:**
+The next step (a cut-down M5) is at the end of this section, after the pre-draft fixes.
 
 - **Supabase is not set up.** No `.env`, so `ingest_history` writes parquet only and says so.
   TASKS M2 asks for parquet *and* Supabase; that half is deferred, not done.
@@ -333,14 +338,71 @@ is built from. Re-examine the double-double-bigs exception in SPEC §6.3 first (
   weighting at a 25-game half-life gives the current season **24% of a player's weight after
   10 games (~3 weeks), 50% after 25 (~8 weeks), 75% after 50 (~16 weeks)**.
 
-  What that does *not* cover is **draft night itself**, which is the one time the board has to
-  be right and the one time zero current-season games exist. The available signal is
-  **preseason** — 2025-26 preseason had 2,021 rows from Oct 2-17, so a draft held days before
-  the 2026-10-20 opener has real data on who is playing where. It is ingested to a separate
-  `preseason_logs_{season}.parquet` and deliberately **kept out of the scoring distribution**,
-  because preseason minutes are not representative (starters rest, deep bench plays). Use it
-  to decide which handful of moved players deserve an override, not as distribution data.
-  Nothing yet reads that file; turning it into a role-change report is the obvious next step.
+  What that does *not* cover is **draft night itself**, when zero current-season games exist.
+  Preseason (`preseason_logs_{season}.parquet`) is now read by the board, but only for
+  *minutes* (rookies and thin histories, below), never as distribution data.
+
+### Pre-draft board fixes (2026-10-16)
+
+Auditing the board against Sleeper's own ranking (`search_rank`) found it silently missing
+players the other managers will draft. All fixed; `build_board` now also runs a **safety net**
+that lists as a gap any Sleeper top-200 player who is not valued. It is empty today.
+
+- **Stars who missed last season were dropped.** The candidate filter required 10 games in
+  2025-26, which removed Haliburton (Sleeper #17), Irving, Lillard and VanVleet. Now 10 games
+  in *any* season of the window qualifies; those players carry a `missed 25-26` flag. A
+  player Sleeper lists with no team is left off (retired or unsigned) -- rotation players
+  among them (20+ min) are listed as a gap instead. The team used is always Sleeper's current
+  one; nothing falls back to last season's team any more.
+- **Rookies were absent.** `engine/model/rookies.py` values them. Measured, so not re-litigated:
+  - Preseason minutes predict regular-season minutes weakly: `regular = 0.90 x pre + 7.0`,
+    r = 0.47, residual sd 6.8 min. So each rookie shows a VOR **range** at +/- 1 sd.
+  - Rookies score **0.908x** a veteran at equal minutes (whole-minute bins), with the spread
+    lower by about the same factor, so the distribution is scaled, not shifted.
+  - The cohort is *all* player-seasons near the projected minutes, all of their games,
+    equal weight per player-season. A rookies-only cohort was tried first and failed: only
+    three 2024-26 rookies averaged 30+ minutes, so value stopped rising with minutes.
+  - **Known weakness: no draft pedigree.** The #1 pick and a second-rounder at equal
+    projected minutes value the same, so top picks (Dybantsa, Peterson, Boozer) come out low.
+    Flagg's rookie season (43.8 fp at 33.5 min) beat veterans at those minutes. The board
+    shows Sleeper's rank beside ours; the high end of the range is the elite-pick case.
+- **Late-season tank call-ups were overrated.** Kennedy Chandler (11 games at 32 min for Utah,
+  Mar-Apr 2026) ranked 59th because his shrinkage prior's band was picked from the same
+  inflated minutes. For anyone under 20 games the band now comes from preseason-projected
+  minutes.
+- **Board additions:** `Slpr` column (Sleeper's rank = what opponents see by default; the gap
+  to our rank is who can be waited on), Sleeper injury status as a flag, default 150 rows.
+
+**Rejected: a preseason role-change report for veterans.** Preseason minutes cannot see role
+changes: starters are rested (Jokic 17.9 min, Maxey 18.5, Durant 19.7), so every star reads as
+a 7-15 minute drop. The meaningful veteran signal is a team change, which the board already
+handles for schedule. 19 of the top 110 changed teams (Giannis MIA, Brown and LeBron PHI,
+Kawhi TOR, AD WAS, ...); their *role* is still last season's, and any adjustment is a manual
+`config/player_overrides.csv` row.
+
+**Judgment calls left to the user, deliberately:** Lillard is our #23 vs Sleeper #146 (torn
+Achilles, age 36; the model only knows 2024-25). Rookie values are wide ranges.
+
+### Next step — cut-down M5 for 2026-10-18
+
+The full M5 (N=2000 sims, per-coach updating, blocking slider) does not fit before the draft.
+Agreed plan with the user, who will draft **on the laptop**, with the static board on the
+phone as the fallback:
+
+1. Poll `/draft/{id}/picks` with a "last updated" clock; on any error keep the last good
+   state rather than going blank.
+2. Best available re-ranked by need via `lineup.marginal_value_to_roster`.
+3. `p_survive` to the user's next pick from a simple opponent model: board/Sleeper rank plus
+   noise, calibrated on last season's draft by the same seven managers
+   (`previous_league_id` `1275683545209122816`). No per-coach updating.
+4. One-line "why" from the existing score breakdown.
+5. Dress rehearsal: replay last season's draft offline, then one real Sleeper mock draft.
+   Under 10 s per pick.
+
+Deferred until after the draft: blocking/denial (its main justification failed in M4 --
+re-examine SPEC §6.3's double-double-bigs exception before building it;
+`lineup.marginal_value_to_roster` already computes the quantity `denial` is built from), the
+full simulation, Supabase, the React/Vercel app, the spec rewrite.
 
 ## Stack
 

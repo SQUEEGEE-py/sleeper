@@ -30,6 +30,7 @@ from engine.ingest.player_ids import (
 )
 from engine.ingest.sleeper import SleeperClient
 from engine.model.distributions import (
+    MIN_GAMES_FOR_RELIABLE_HISTORY,
     EmpiricalScoreDistribution,
     build_distribution,
     role_prior,
@@ -37,15 +38,28 @@ from engine.model.distributions import (
 )
 from engine.model.lineup import starting_slots
 from engine.model.lockin import season_value, weekly_value
+from engine.model.rookies import (
+    fit_minutes_projection,
+    preseason_minutes,
+    player_seasons,
+    rookie_cohort_distribution,
+    rookie_discount,
+    rookie_seasons,
+)
 from engine.model.valuation import PlayerValue, build_board as rank_board
 
 CONFIG_PATH = Path("config/league.json")
 HISTORY_SEASONS = 3
-DEFAULT_TOP = 120
+DEFAULT_TOP = 150  # 104 picks in the draft, plus a cushion for the fallback board
 
 # A player needs some recent evidence to appear at all. Someone who last played two seasons
 # ago and not since is not a draft candidate; he is noise on a 120-row board.
 MIN_RECENT_GAMES = 10
+
+# Any player Sleeper ranks inside this many who is not valued is listed as a gap.
+SAFETY_NET_SLEEPER_RANK = 200
+# Teamless players are reported as a gap only if they averaged this many minutes.
+TEAMLESS_REPORT_MINUTES = 20.0
 
 
 def load_config() -> dict:
@@ -77,19 +91,31 @@ def load_logs(data_dir: Path, season: str) -> pd.DataFrame:
 
 
 def candidate_players(logs: pd.DataFrame, season: str) -> pd.DataFrame:
-    """Players with enough recent evidence to be worth ranking."""
+    """Players with enough evidence to be worth ranking.
+
+    Ten games last season, **or** ten games in any earlier season of the window. The second
+    clause exists because the first alone silently dropped Haliburton, Irving, Lillard and
+    VanVleet -- stars who missed 2025-26 injured and are back in 2026-27 preseason. Those
+    players come back with ``missed_last_season`` set so the board can say so; the caller
+    must still check that Sleeper lists them on a team, which is what separates "returning
+    from injury" from "retired".
+    """
     latest = previous_seasons(season, 1)[0]
-    recent = logs[logs["season"] == latest]
-    counts = recent.groupby("nba_player_id").size()
-    keep = set(counts[counts >= MIN_RECENT_GAMES].index)
-    return (
-        recent[recent["nba_player_id"].isin(keep)]
+    counts = logs.groupby(["nba_player_id", "season"]).size().unstack(fill_value=0)
+    recent_ok = counts.get(latest, pd.Series(0, index=counts.index)) >= MIN_RECENT_GAMES
+    any_ok = (counts >= MIN_RECENT_GAMES).any(axis=1)
+    keep = counts.index[any_ok]
+
+    latest_rows = (
+        logs[logs["nba_player_id"].isin(keep)]
         .sort_values("game_date")
         .drop_duplicates("nba_player_id", keep="last")[
             ["nba_player_id", "player_name", "team"]
         ]
         .reset_index(drop=True)
     )
+    latest_rows["missed_last_season"] = ~latest_rows["nba_player_id"].map(recent_ok)
+    return latest_rows
 
 
 # Minutes bands for the role prior (SPEC §5.1 step 3). Minutes are the usable proxy for role:
@@ -161,8 +187,19 @@ def render_html(
         if row["value_multiplier"] != 1.0:
             classes.append("adj")
         flag_bits = []
-        if not row["history_reliable"]:
+        flags = [flag for flag in row.get("flags", "").split("|") if flag]
+        if "rookie" in flags:
+            flag_bits.append(
+                "<span class=warn title='no NBA history: valued as past rookies at "
+                f"~{row['projected_minutes']:.0f} projected minutes'>rookie "
+                f"~{row['projected_minutes']:.0f}m, VOR {row['vor_low']:.1f} to "
+                f"{row['vor_high']:.1f}</span>"
+            )
+        elif not row["history_reliable"]:
             flag_bits.append(f"<span class=warn title='only {row['games_observed']} games'>thin</span>")
+        for flag in flags:
+            if flag != "rookie":
+                flag_bits.append(f"<span class=warn>{html.escape(flag)}</span>")
         if row["value_multiplier"] != 1.0:
             flag_bits.append(
                 f"<span class=adjm title='{html.escape(row['note'])}'>x{row['value_multiplier']:.2f}</span>"
@@ -173,7 +210,8 @@ def render_html(
             "<td class=num><b>{vor:.1f}</b></td><td class=num>{season:.1f}</td>"
             "<td class=num>{rep:.1f}</td><td class=num>{mean:.1f}</td>"
             "<td class=num>{sd:.1f}</td><td class=num>{pplay:.0%}</td>"
-            "<td class=num>{w1:.0f}/{w2:.0f}/{w3:.0f}/{w4:.0f}</td><td>{flags}</td></tr>".format(
+            "<td class=num>{w1:.0f}/{w2:.0f}/{w3:.0f}/{w4:.0f}</td><td class=num>{slpr}</td>"
+            "<td>{flags}</td></tr>".format(
                 cls=" ".join(classes),
                 rank=index,
                 name=html.escape(row["name"]),
@@ -186,6 +224,7 @@ def render_html(
                 sd=row["sd"],
                 pplay=row["p_play"],
                 w1=row["w1"], w2=row["w2"], w3=row["w3"], w4=row["w4"],
+                slpr=row["sleeper_rank"] if row.get("sleeper_rank") else "&ndash;",
                 flags="".join(flag_bits),
             )
         )
@@ -235,7 +274,8 @@ background:var(--bg);color:var(--fg);font-size:16px}}
 <th title="mean fantasy points per game played">Mean</th>
 <th title="standard deviation; higher is better in Lock-In">SD</th>
 <th title="probability he plays a given game">Play</th>
-<th title="weekly value in a 1/2/3/4 game week">W 1/2/3/4</th><th></th>
+<th title="weekly value in a 1/2/3/4 game week">W 1/2/3/4</th>
+<th title="Sleeper's own rank: the default order the other managers see">Slpr</th><th></th>
 </tr></thead><tbody>
 {''.join(body_rows)}
 </tbody></table></div>
@@ -273,7 +313,28 @@ def main() -> int:
 
     logs = load_logs(args.data_dir, season)
     candidates = candidate_players(logs, season)
-    print(f"{len(candidates)} candidates with >= {MIN_RECENT_GAMES} recent games")
+    print(
+        f"{len(candidates)} candidates with >= {MIN_RECENT_GAMES} games in a season "
+        f"({int(candidates['missed_last_season'].sum())} of them missed last season)"
+    )
+
+    # Rookies: in this preseason, absent from every regular season we hold.
+    preseason_path = args.data_dir / f"preseason_logs_{season}.parquet"
+    preseason = pd.read_parquet(preseason_path) if preseason_path.exists() else pd.DataFrame()
+    rookies = pd.DataFrame(columns=["nba_player_id", "player_name", "team", "games", "minutes"])
+    projection = None
+    if len(preseason):
+        summary = preseason_minutes(preseason)
+        # Preseason includes exhibitions against non-NBA clubs (London Lions, "LON");
+        # their players are not draftable, so only NBA teams count.
+        rookies = summary[
+            ~summary["nba_player_id"].isin(logs["nba_player_id"])
+            & summary["team"].isin(grid.index)
+        ]
+        latest = previous_seasons(season, 1)[0]
+        projection = fit_minutes_projection(logs[logs["season"] == latest], preseason)
+        print(f"{len(rookies)} preseason players with no regular-season history (rookies)")
+        print(f"minutes projection: {projection.describe()}")
 
     with SleeperClient() as client:
         sleeper_players = client.get_players()
@@ -283,7 +344,8 @@ def main() -> int:
         [
             (int(row.nba_player_id), row.player_name, row.team)
             for row in candidates.itertuples()
-        ],
+        ]
+        + [(int(row.nba_player_id), row.player_name, row.team) for row in rookies.itertuples()],
         sleeper_players,
         overrides,
     )
@@ -297,6 +359,12 @@ def main() -> int:
 
     priors = build_minutes_priors(logs)
     mean_minutes = logs.groupby("nba_player_id")["minutes"].mean()
+    games_played = logs.groupby("nba_player_id").size()
+    preseason_minutes_by_id = (
+        preseason_minutes(preseason).set_index("nba_player_id")["minutes"].to_dict()
+        if len(preseason)
+        else {}
+    )
 
     def distribution_for(nba_id: int) -> EmpiricalScoreDistribution:
         """Recency-weighted, shrunk toward the prior for his minutes band, then overridden.
@@ -304,8 +372,20 @@ def main() -> int:
         Without the shrinkage a volatile 14-minute rookie outranks established starters:
         Lock-In rewards variance, and a thin sample is almost all variance. The prior is what
         makes a small sample behave like a small sample.
+
+        For a thin history the prior's band comes from his **preseason-projected** minutes
+        when he has any. Otherwise the band is picked by the very sample it is meant to
+        temper: late-season call-ups on tanking teams (Kennedy Chandler, 11 games at 32
+        minutes for Utah in March-April 2026) got a 30-36 minute prior and ranked 59th.
         """
-        prior = priors.get(band_for(float(mean_minutes.get(nba_id, 0.0))))
+        minutes = float(mean_minutes.get(nba_id, 0.0))
+        if (
+            projection is not None
+            and games_played.get(nba_id, 0) < MIN_GAMES_FOR_RELIABLE_HISTORY
+            and nba_id in preseason_minutes_by_id
+        ):
+            minutes = projection.project(preseason_minutes_by_id[nba_id])
+        prior = priors.get(band_for(minutes))
         distribution = build_distribution(logs, nba_id, prior=prior)
         override = override_by_id.get(nba_id)
         if override is not None:
@@ -318,10 +398,55 @@ def main() -> int:
     for nba_id, name, _ in mapping.ambiguous:
         gaps.append(f"ambiguous Sleeper match: {name} (nba id {nba_id})")
 
+    seasons_table = None
+    discount = 1.0
+    if len(rookies):
+        discount = rookie_discount(logs, rookie_seasons(logs))
+        seasons_table = player_seasons(logs)
+        print(f"rookie discount: {discount:.3f} of a veteran at the same minutes")
+
+    def rookie_distribution(minutes: float, nba_id: int) -> EmpiricalScoreDistribution:
+        distribution = rookie_cohort_distribution(logs, seasons_table, minutes, discount)
+        override = override_by_id.get(nba_id)
+        if override is not None:
+            distribution = apply_override(distribution, override.value_multiplier, override.p_play)
+        return distribution
+
+    # (nba_id, name, fallback team, flags, preseason minutes or None for a veteran)
+    pool = [
+        (
+            int(row.nba_player_id),
+            row.player_name,
+            row.team,
+            ("missed 25-26",) if row.missed_last_season else (),
+            None,
+        )
+        for row in candidates.itertuples()
+    ] + [
+        (int(row.nba_player_id), row.player_name, row.team, ("rookie",), float(row.minutes))
+        for row in rookies.itertuples()
+    ]
+
+    # Sleeper's own ranking, 1 = first. It is the default sort in the Sleeper draft room, so it
+    # is the market: what the other seven managers see when they are on the clock.
+    by_search_rank = sorted(
+        (
+            player
+            for player in sleeper_players.values()
+            if player.active and player.team and (player.model_extra or {}).get("search_rank")
+        ),
+        key=lambda player: player.model_extra["search_rank"],
+    )
+    sleeper_rank = {player.player_id: index for index, player in enumerate(by_search_rank, 1)}
+    sleeper_rank_by_id: dict[int, int | None] = {}
+
     players: list[PlayerValue] = []
+    distributions: dict[int, EmpiricalScoreDistribution] = {}
+    rookie_ranges: dict[int, tuple[float, float, float]] = {}  # id -> (minutes, low, high)
+    valued_sleeper_ids: set[str] = set()
     missing_schedule: set[str] = set()
-    for row in candidates.itertuples():
-        nba_id = int(row.nba_player_id)
+    teamless: list[str] = []
+    for nba_id, name, fallback_team, flags, pre_minutes in pool:
         sleeper_id = mapping.nba_to_sleeper.get(nba_id)
         if sleeper_id is None:
             continue  # already reported as a gap above
@@ -329,22 +454,48 @@ def main() -> int:
         sleeper_player = sleeper_players[sleeper_id]
         positions = tuple(sleeper_player.fantasy_positions or [])
         if not positions:
-            gaps.append(f"no fantasy positions in Sleeper: {row.player_name}")
+            gaps.append(f"no fantasy positions in Sleeper: {name}")
             continue
 
-        team = sleeper_player.team or row.team
+        # Sleeper's team is the current one. Without it the player is a free agent or
+        # retired; valuing him on his old team's schedule would be inventing a roster spot.
+        team = sleeper_player.team
+        if not team:
+            # A rotation player from last season with no team is worth knowing about; the
+            # long tail of unsigned bench players is not.
+            if not flags and mean_minutes.get(nba_id, 0.0) >= TEAMLESS_REPORT_MINUTES:
+                teamless.append(f"{name} (last with {fallback_team})")
+            continue
         if team not in grid.index:
             missing_schedule.add(team)
             continue
 
-        override = override_by_id.get(nba_id)
-        distribution = distribution_for(nba_id)
+        if pre_minutes is None:
+            distribution = distribution_for(nba_id)
+        else:
+            projected = projection.project(pre_minutes)
+            distribution = rookie_distribution(projected, nba_id)
+            schedule = [int(games) for games in grid.loc[team]]
+            low = season_value(
+                rookie_distribution(projected - projection.residual_sd, nba_id), schedule
+            )
+            high = season_value(
+                rookie_distribution(projected + projection.residual_sd, nba_id), schedule
+            )
+            rookie_ranges[nba_id] = (projected, low, high)
+        distributions[nba_id] = distribution
 
+        if sleeper_player.injury_status:
+            flags = flags + (sleeper_player.injury_status,)
+
+        override = override_by_id.get(nba_id)
         schedule = [int(games) for games in grid.loc[team]]
+        valued_sleeper_ids.add(sleeper_id)
+        sleeper_rank_by_id[nba_id] = sleeper_rank.get(sleeper_id)
         players.append(
             PlayerValue(
                 player_id=nba_id,
-                name=row.player_name,
+                name=name,
                 team=team,
                 positions=positions,
                 season_value=season_value(distribution, schedule),
@@ -356,11 +507,26 @@ def main() -> int:
                 history_reliable=distribution.history_reliable,
                 value_multiplier=override.value_multiplier if override else 1.0,
                 note=override.note if override else "",
+                flags=flags,
             )
         )
 
     for team in sorted(missing_schedule):
         gaps.append(f"no 2026-27 schedule for team {team}; its players are omitted")
+    if teamless:
+        gaps.append(
+            "no current team in Sleeper, left off the board: " + ", ".join(sorted(teamless))
+        )
+
+    # Safety net. Anyone Sleeper itself ranks highly who is still not valued is a player the
+    # other managers will draft and this board cannot see -- exactly the silent gap that hid
+    # Haliburton the first time.
+    for position, player in enumerate(by_search_rank[:SAFETY_NET_SLEEPER_RANK], start=1):
+        if player.player_id not in valued_sleeper_ids:
+            gaps.append(
+                f"NOT VALUED: {player.full_name} ({player.team}), Sleeper rank {position} "
+                "-- no NBA logs or preseason games found"
+            )
 
     if not players:
         raise SystemExit("no players could be valued; nothing to rank")
@@ -389,15 +555,21 @@ def main() -> int:
             "history_reliable": player.history_reliable,
             "value_multiplier": player.value_multiplier,
             "note": player.note,
+            "flags": "|".join(player.flags),
+            "sleeper_rank": sleeper_rank_by_id.get(player.player_id),
             "nba_player_id": player.player_id,
         }
+        if player.player_id in rookie_ranges:
+            minutes, low, high = rookie_ranges[player.player_id]
+            distribution_row["projected_minutes"] = minutes
+            distribution_row["vor_low"] = low - replacement
+            distribution_row["vor_high"] = high - replacement
         rows.append(distribution_row)
 
     # Weekly value by game count, for the board's W 1/2/3/4 column.
     for row, (player, _, _) in zip(rows, ranked[: args.top]):
-        schedule_distribution = distribution_for(player.player_id)
         for n in (1, 2, 3, 4):
-            row[f"w{n}"] = weekly_value(schedule_distribution, n)
+            row[f"w{n}"] = weekly_value(distributions[player.player_id], n)
 
     frame = pd.DataFrame(rows)
     frame.insert(0, "rank", range(1, len(frame) + 1))

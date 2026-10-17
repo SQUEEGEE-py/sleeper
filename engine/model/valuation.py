@@ -38,6 +38,7 @@ class PlayerValue:
     history_reliable: bool = True
     value_multiplier: float = 1.0
     note: str = ""
+    flags: tuple[str, ...] = ()  # e.g. "rookie", "missed 25-26", a Sleeper injury status
 
 
 @dataclass(frozen=True)
