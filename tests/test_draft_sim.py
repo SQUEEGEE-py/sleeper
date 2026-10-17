@@ -205,3 +205,17 @@ def test_full_lineup_falls_back_to_best_player_available() -> None:
     )
     assert all(item.gain == 0.0 for item in advice)
     assert advice[0].index == 1
+
+
+def test_back_to_back_picks_list_the_more_valuable_player_first() -> None:
+    """At the turn both players are certain to be there; the bigger one goes first."""
+    vor = [14.29, 16.19, 13.7]
+    positions: list[tuple[str, ...]] = [("PF", "SF", "SG"), ("PF", "SF"), ("PF", "SF")]
+    adp = [32.0, 11.0, 26.0]
+    filler_vor, filler_pos, filler_adp = fillers(10, 40.0)
+    clock = draft_clock(slot=8, teams=8, rounds=13, picks_made=7)
+    advice = advise(
+        np.array(vor + filler_vor), positions + filler_pos, np.array(adp + filler_adp),
+        [], [], SLOTS, clock, n_sims=300, rng=np.random.default_rng(0),
+    )
+    assert [item.index for item in advice[:2]] == [1, 0]

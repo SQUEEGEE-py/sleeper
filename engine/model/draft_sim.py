@@ -236,7 +236,10 @@ def advise(
         outside = np.setdiff1d(np.arange(n), order[:candidates])
         scores[outside] = -np.inf
 
-    ranked = sorted(range(n), key=lambda i: (-scores[i], -gains[i], -vor[i]))
+    # Scores are rounded before ranking. At a back-to-back pick (the turn) taking A then B
+    # and B then A score identically, up to float noise; unrounded, the noise decided which
+    # was listed first and the 2026 mock draft showed the lower-value player on top.
+    ranked = sorted(range(n), key=lambda i: (-round(scores[i], 6), -gains[i], -vor[i]))
     return [
         Advice(index=i, gain=float(gains[i]), p_survive=float(p_survive[i]), score=float(scores[i]))
         for i in ranked
