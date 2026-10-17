@@ -39,20 +39,24 @@ ends with the user taking the action in the Sleeper app.
 
 **M0 through M4 complete — the pre-draft board ships**, now including rookies and stars who
 missed last season (see "Pre-draft board fixes" below). **The draft is Sunday 2026-10-18 at
-18:00 local.** M5 (live draft assistant) not started; a cut-down version is the next job.
+18:00 local.** A cut-down M5 live draft advisor is built and rehearsed (see "M5, cut down"
+below); the one rehearsal step left is a real Sleeper mock draft, which the user has to create.
 
 Everything runnable today, in the order you would use it:
 
 ```
-uv run pytest                                             # 243 tests, none need the network
+uv run pytest                                             # 281 tests, none need the network
 uv run python -m engine.jobs.verify_league                # config vs live Sleeper; exits 1 on drift
 uv run python -m engine.jobs.ingest_history [--force]     # LOCAL ONLY: logs + schedule -> parquet
-uv run python -m engine.jobs.build_board [--top 150]      # -> data/board/board.{csv,html}
+uv run python -m engine.jobs.build_board [--top 150]      # -> data/board/{board.csv,board.html,pool.csv}
 uv run python -m engine.jobs.player_value "Jokic" [--compare "Kawhi" ...]
+uv run python -m engine.jobs.draft_rehearsal [--slot 5] [--drafts 2]   # synthetic drafts, timed
+uv run python -m engine.jobs.draft_rehearsal --calibrate                # 2025 replay -> sigma
+uv run python -m engine.jobs.draft_live [--draft-id <mock id>] [--slot N] # -> data/draft/live.html
 ```
 
 Per-file test counts: scoring 89, lockin 29, distributions 27, nba_stats 26, lineup 25,
-player_ids 22, rookies 14, valuation 11.
+player_ids 22, draft_sim 28, rookies 14, valuation 11, draft_live 10.
 
 `data/` is gitignored and regenerable. **On a fresh checkout run `ingest_history` then
 `build_board` before anything else** -- the 2026-10-16 session started with no `data/` at all.
@@ -63,11 +67,11 @@ What exists and works:
 - `uv` project on Python 3.11 with the M0 deps. Run anything with `uv run python -m <module>`.
 - Repo skeleton from SPEC §1. Modules belonging to later milestones are **empty placeholder
   files, not stubs** — `lockin.py`, `distributions.py`, `valuation.py`, `lineup.py`,
-  `draft_sim.py`, `matchup.py`, the market/news `ingest/` modules and `draft_live.py` /
-  `nightly.py` are 0 bytes on purpose. Don't mistake them for work in progress. Real so far:
-  `scoring.py` (M1), `nba_stats.py` (M2), `distributions.py` and `lockin.py` (M3),
-  `player_ids.py`, `lineup.py`, `valuation.py` and `build_board.py` (M4), `rookies.py`
-(pre-draft fixes).
+  `matchup.py`, the market/news `ingest/` modules and `nightly.py` are 0 bytes on purpose.
+  Don't mistake them for work in progress. Real so far: `scoring.py` (M1), `nba_stats.py`
+  (M2), `distributions.py` and `lockin.py` (M3), `player_ids.py`, `lineup.py`, `valuation.py`
+  and `build_board.py` (M4), `rookies.py` (pre-draft fixes), `draft_sim.py`, `draft_live.py`
+  and `draft_rehearsal.py` (M5, cut down).
 - `engine/ingest/sleeper.py` — typed pydantic client for the SPEC §2.1 endpoints. Every
   response is cached to disk under `data/cache/sleeper/` with a fetch timestamp; `players/nba`
   is TTL-capped at 24h. Reruns and tests never need the network.
@@ -383,26 +387,63 @@ Kawhi TOR, AD WAS, ...); their *role* is still last season's, and any adjustment
 **Judgment calls left to the user, deliberately:** Lillard is our #23 vs Sleeper #146 (torn
 Achilles, age 36; the model only knows 2024-25). Rookie values are wide ranges.
 
-### Next step — cut-down M5 for 2026-10-18
+### M5, cut down — live draft advisor (built 2026-10-16)
 
-The full M5 (N=2000 sims, per-coach updating, blocking slider) does not fit before the draft.
-Agreed plan with the user, who will draft **on the laptop**, with the static board on the
-phone as the fallback:
+The full M5 (per-coach updating, positional-need opponents, threat, blocking slider) did not
+fit before the draft. What was built instead, agreed with the user, who drafts **on the
+laptop** with the static board on the phone as the fallback:
 
-1. Poll `/draft/{id}/picks` with a "last updated" clock; on any error keep the last good
-   state rather than going blank.
-2. Best available re-ranked by need via `lineup.marginal_value_to_roster`.
-3. `p_survive` to the user's next pick from a simple opponent model: board/Sleeper rank plus
-   noise, calibrated on last season's draft by the same seven managers
-   (`previous_league_id` `1275683545209122816`). No per-coach updating.
-4. One-line "why" from the existing score breakdown.
-5. Dress rehearsal: replay last season's draft offline, then one real Sleeper mock draft.
-   Under 10 s per pick.
+- `engine/model/draft_sim.py` (pure, 28 tests): snake arithmetic, survival simulation,
+  roster-aware value, one-step lookahead. Its docstring has the full reasoning.
+- `engine/jobs/draft_live.py` (10 tests): polls the draft every 3 s, writes
+  `data/draft/live.html` (self-contained, reloads itself) and prints the same to the
+  terminal. Identifies the user by Sleeper username (`/user/{username}`), so it works on a
+  mock draft by `--draft-id` too; slot comes from `draft_order`, else his own picks, else
+  `--slot`. Before the slot is known it still ranks by value.
+- `engine/jobs/draft_rehearsal.py`: synthetic full drafts through the same `build_view`, and
+  the 2025 calibration replay.
 
-Deferred until after the draft: blocking/denial (its main justification failed in M4 --
-re-examine SPEC §6.3's double-double-bigs exception before building it;
-`lineup.marginal_value_to_roster` already computes the quantity `denial` is built from), the
-full simulation, Supabase, the React/Vercel app, the spec rewrite.
+Decisions and measurements, so they are not re-litigated:
+
+- **Opponents follow Sleeper ADP**, from the undocumented
+  `api.sleeper.com/projections/nba/{season}` (`stats.adp_std`), probed 2026-10-16; 2026 rows
+  update daily. On this league's 2025 draft, 2025 ADP vs actual pick: **Spearman 0.948**.
+  Caveat: the 2025 rows were last modified Jun-Jul 2026, so they may not be the exact
+  draft-day snapshot.
+- **Noise sigma = 0.30, from calibration, not from the pick spread.** `sd(log(pick/ADP))` is
+  0.21, but 0.21 is overconfident when predicting who lasts (3% predicted, 11% actual). 0.30
+  is calibrated in every bin and has the best Brier (0.0978) over 0.15-0.40.
+  `draft_rehearsal --calibrate` reproduces the table.
+- **Roster value is lineup gain in VOR units**, with an empty slot worth 0. Do **not** switch to
+  replacement-level phantom players: every phantom chains into UTIL and value collapses to a
+  flat cutoff, the same trap as M4's (`test_gain_is_not_a_flat_cutoff`).
+- **Lookahead:** score = gain now + expected best gain still there at the following pick,
+  over 2000 sims, given he is taken. This is what makes it take the player about to go over a
+  slightly better one who will last (`test_takes_the_player_who_will_be_gone_...`).
+- **Failure behaviour:** a fetch error keeps the last good state and shows a red banner with
+  its age; the page turns red on its own (inline JS) if not rewritten for 20 s, meaning the
+  process died. Pages are written atomically. Verified with the network blocked.
+
+Rehearsal results: 16 synthetic drafts (2 per slot), **slowest pick 0.57 s** against the
+10 s budget, every lineup filled.
+
+**Known limits, all deliberate for draft night:**
+
+- Bench picks have zero lineup gain, so once the nine starters are set the advice is plain
+  best-VOR-available. In Lock-In, bench depth is injury cover, which this does not value.
+- No per-coach model. cyapp1 took players ~25% ahead of ADP all through 2025, the largest
+  coach effect, and the first thing to add.
+- No positional need in the opponent model, so it may slightly overrate the survival of a
+  position everyone still needs late.
+- `enforce_position_limits` is on in the draft settings; the limits themselves are unknown.
+
+**Before the draft (user):** create a Sleeper mock draft with the league's settings and run
+`draft_live --draft-id <id>` against it once; rebuild the board on draft day; copy
+`data/board/board.html` to the phone. Then on the night: `draft_live` with no arguments.
+
+**After the draft:** per-coach priors from the 2025 picks, positional need, bench/injury
+value, blocking/denial (re-examine SPEC §6.3's double-double-bigs exception first), Supabase,
+the React/Vercel app, the spec rewrite.
 
 ## Stack
 

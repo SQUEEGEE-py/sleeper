@@ -16,6 +16,13 @@ import httpx
 from pydantic import BaseModel, ConfigDict
 
 BASE_URL = "https://api.sleeper.app/v1"
+# Undocumented, but the source of Sleeper's own ADP. Probed 2026-10-16 (rule 6):
+# GET /projections/nba/{season}?season_type=regular -> list of ~2130 rows, each with
+# ``player_id`` and a ``stats`` dict whose ``adp_std`` is redraft ADP (``adp_dynasty`` is the
+# dynasty one). The 2026 rows were updated that day; the 2025 rows were last touched
+# June-July 2026, after the season, so treat historical ADP as a close but unproven snapshot.
+PROJECTIONS_URL = "https://api.sleeper.com/projections/nba"
+ADP_CACHE_TTL_SECONDS = 6 * 60 * 60
 DEFAULT_CACHE_DIR = Path("data/cache/sleeper")
 
 # players/nba is a multi-MB payload Sleeper asks callers to fetch at most once a day.
@@ -80,6 +87,13 @@ class DraftPick(BaseModel):
     roster_id: int | None
     player_id: str
     draft_id: str
+
+
+class ProjectionRow(BaseModel):
+    model_config = ConfigDict(extra="allow")
+
+    player_id: str
+    stats: dict[str, float | None] = {}
 
 
 class Player(BaseModel):
@@ -148,6 +162,12 @@ class SleeperClient:
         _write_cache(self.cache_dir, cache_key, data)
         return data
 
+    def get_user(self, username: str) -> User:
+        """A Sleeper user by username. Probed 2026-10-16: ``/user/{username}`` returns
+        ``user_id``, ``username`` and ``display_name``; no ``league_id``."""
+        data = self._get(f"/user/{username}", f"user_{username.lower()}")
+        return User.model_validate(data)
+
     def get_league(self, league_id: str) -> League:
         data = self._get(f"/league/{league_id}", f"league_{league_id}")
         return League.model_validate(data)
@@ -177,6 +197,43 @@ class SleeperClient:
     def get_draft_picks(self, draft_id: str) -> list[DraftPick]:
         data = self._get(f"/draft/{draft_id}/picks", f"draft_picks_{draft_id}")
         return [DraftPick.model_validate(p) for p in data]
+
+    def _get_fresh(self, path: str, cache_key: str) -> Any:
+        """Always hit the network, then cache. For state that changes by the second."""
+        response = self._http.get(path)
+        response.raise_for_status()
+        data = response.json()
+        _write_cache(self.cache_dir, cache_key, data)
+        return data
+
+    def get_draft_live(self, draft_id: str) -> Draft:
+        """The draft object, never from cache: draft_order appears when the draft starts."""
+        return Draft.model_validate(self._get_fresh(f"/draft/{draft_id}", f"draft_{draft_id}"))
+
+    def get_draft_picks_live(self, draft_id: str) -> list[DraftPick]:
+        """Picks so far, never from cache. ``get_draft_picks`` caches forever, which is right
+        for a completed draft and wrong for one in progress."""
+        data = self._get_fresh(f"/draft/{draft_id}/picks", f"draft_picks_{draft_id}")
+        return [DraftPick.model_validate(p) for p in data]
+
+    def get_adp(self, season: str) -> dict[str, float]:
+        """Sleeper redraft ADP (``adp_std``) by Sleeper player id. Players without one are
+        absent, not defaulted -- the caller decides what an unranked player means."""
+        key = f"projections_{season}"
+        data = _read_cache(self.cache_dir, key, ADP_CACHE_TTL_SECONDS)
+        if data is None:
+            response = self._http.get(
+                f"{PROJECTIONS_URL}/{season}", params={"season_type": "regular"}
+            )
+            response.raise_for_status()
+            data = response.json()
+            _write_cache(self.cache_dir, key, data)
+        rows = [ProjectionRow.model_validate(row) for row in data]
+        return {
+            row.player_id: float(row.stats["adp_std"])
+            for row in rows
+            if row.stats.get("adp_std") is not None
+        }
 
     def get_players(self) -> dict[str, Player]:
         data = self._get(

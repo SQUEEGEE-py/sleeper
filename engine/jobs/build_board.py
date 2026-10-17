@@ -539,8 +539,10 @@ def main() -> int:
         )
 
     args.out.mkdir(parents=True, exist_ok=True)
+    # Every valued player, not only the top N: the live draft advisor needs the whole pool,
+    # because by round 10 the best available is well below the board's cut.
     rows = []
-    for player, vor, replacement in ranked[: args.top]:
+    for player, vor, replacement in ranked:
         distribution_row = {
             "name": player.name,
             "team": player.team,
@@ -558,6 +560,7 @@ def main() -> int:
             "flags": "|".join(player.flags),
             "sleeper_rank": sleeper_rank_by_id.get(player.player_id),
             "nba_player_id": player.player_id,
+            "sleeper_id": mapping.nba_to_sleeper[player.player_id],
         }
         if player.player_id in rookie_ranges:
             minutes, low, high = rookie_ranges[player.player_id]
@@ -567,12 +570,15 @@ def main() -> int:
         rows.append(distribution_row)
 
     # Weekly value by game count, for the board's W 1/2/3/4 column.
-    for row, (player, _, _) in zip(rows, ranked[: args.top]):
+    for row, (player, _, _) in zip(rows, ranked):
         for n in (1, 2, 3, 4):
             row[f"w{n}"] = weekly_value(distributions[player.player_id], n)
 
-    frame = pd.DataFrame(rows)
-    frame.insert(0, "rank", range(1, len(frame) + 1))
+    pool = pd.DataFrame(rows)
+    pool.insert(0, "rank", range(1, len(pool) + 1))
+    pool.to_csv(args.out / "pool.csv", index=False)
+    frame = pool.head(args.top)
+    rows = rows[: args.top]
     csv_path = args.out / "board.csv"
     frame.to_csv(csv_path, index=False)
 
@@ -586,6 +592,7 @@ def main() -> int:
     print(f"\nreplacement levels: "
           + ", ".join(f"{slot} {value:.1f}" for slot, value in sorted(levels.by_slot.items())))
     print(f"\nwrote {csv_path} and {html_path} ({len(frame)} players)")
+    print(f"wrote {args.out / 'pool.csv'} ({len(pool)} players, for the live draft advisor)")
     if gaps:
         print(f"\n{len(gaps)} gap(s) surfaced on the board:")
         for gap in gaps[:10]:
