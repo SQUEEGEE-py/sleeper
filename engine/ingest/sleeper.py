@@ -21,6 +21,10 @@ BASE_URL = "https://api.sleeper.app/v1"
 # ``player_id`` and a ``stats`` dict whose ``adp_std`` is redraft ADP (``adp_dynasty`` is the
 # dynasty one). The 2026 rows were updated that day; the 2025 rows were last touched
 # June-July 2026, after the season, so treat historical ADP as a close but unproven snapshot.
+# **A past season's stat "projections" are actuals, overwritten after the season**: 2025 rows
+# match real 2025-26 per-game output at r = 1.000 for rookies and 0.992 for veterans. Never
+# backtest anything against them. ADP looks genuinely pre-season (Knueppel 132 before his
+# breakout, unranked players at 999), which is what the sigma calibration relies on.
 PROJECTIONS_URL = "https://api.sleeper.com/projections/nba"
 ADP_CACHE_TTL_SECONDS = 6 * 60 * 60
 DEFAULT_CACHE_DIR = Path("data/cache/sleeper")
