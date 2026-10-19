@@ -35,12 +35,13 @@ ends with the user taking the action in the Sleeper app.
    accurate when written but these are mostly undocumented or fast-moving APIs. Probe first,
    then write the client.
 
-## Current state (2026-10-16)
+## Current state (2026-10-19)
 
-**M0 through M4 complete — the pre-draft board ships**, now including rookies and stars who
-missed last season (see "Pre-draft board fixes" below). **The draft is Sunday 2026-10-18 at
-18:00 local.** A cut-down M5 live draft advisor is built and rehearsed, including a full
-real Sleeper mock draft on 2026-10-16 (see "M5, cut down" below). Ready for the draft.
+**The draft is done** (Sunday 2026-10-18, see "The draft" below). M0-M4 and a cut-down M5
+carried it: the board plus a live advisor the user followed all night. **The season opens
+Tuesday 2026-10-20 and the in-season side (M6, the nightly lock-or-roll advisor) is not
+built.** That is the next job, and with this roster it matters more than usual: deciding when
+to lock old, rest-prone stars is exactly where Lock-In is won or lost.
 
 Everything runnable today, in the order you would use it:
 
@@ -65,13 +66,12 @@ Rebuild the board on draft day to pick up Sleeper injury statuses.
 What exists and works:
 
 - `uv` project on Python 3.11 with the M0 deps. Run anything with `uv run python -m <module>`.
-- Repo skeleton from SPEC §1. Modules belonging to later milestones are **empty placeholder
-  files, not stubs** — `lockin.py`, `distributions.py`, `valuation.py`, `lineup.py`,
-  `matchup.py`, the market/news `ingest/` modules and `nightly.py` are 0 bytes on purpose.
-  Don't mistake them for work in progress. Real so far: `scoring.py` (M1), `nba_stats.py`
-  (M2), `distributions.py` and `lockin.py` (M3), `player_ids.py`, `lineup.py`, `valuation.py`
-  and `build_board.py` (M4), `rookies.py` (pre-draft fixes), `draft_sim.py`, `draft_live.py`
-  and `draft_rehearsal.py` (M5, cut down).
+- Repo skeleton from SPEC §1. The only **empty placeholder files, not stubs**, left are
+  `engine/ingest/markets.py`, `engine/ingest/news.py` and `engine/jobs/nightly.py` (0 bytes on
+  purpose; SPEC §1's `matchup.py` does not exist yet). Real so far: `scoring.py` (M1),
+  `nba_stats.py` (M2), `distributions.py` and `lockin.py` (M3), `player_ids.py`, `lineup.py`,
+  `valuation.py` and `build_board.py` (M4), `rookies.py` (pre-draft fixes), `draft_sim.py`,
+  `draft_live.py` and `draft_rehearsal.py` (M5, cut down).
 - `engine/ingest/sleeper.py` — typed pydantic client for the SPEC §2.1 endpoints. Every
   response is cached to disk under `data/cache/sleeper/` with a fetch timestamp; `players/nba`
   is TTL-capped at 24h. Reruns and tests never need the network.
@@ -102,26 +102,25 @@ resolutions are recorded in `config/league.json`'s `_*_comment` fields:
 ### The league itself
 
 **National Logan League**, `league_id` `1405604996254339072`, draft `1405604996266901504`
-(snake, 13 rounds, 90s pick timer, `pre_draft`). The user is **`Squ33gee`, roster_id 4**. The
-other seven managers, who are the opponent models in SPEC §6.2: `tristantro`, `amancito`,
-`2jake4davis6`, `aala1aala2`, `cyapp1`, `gilbobo`, `ChickenJoe2107`.
+(snake, 13 rounds, 90s pick timer, **`complete`**). The user is **`Squ33gee`**, Sleeper
+`user_id` `1152443723016556544`, **roster_id 4, draft slot 1** -- roster_id and draft slot
+are different numbers (`slot_to_roster_id` maps them); key rosters on roster_id. The other
+seven managers: `tristantro`, `amancito`, `2jake4davis6`, `aala1aala2`, `cyapp1`, `gilbobo`,
+`ChickenJoe2107`.
 
 `previous_league_id` `1275683545209122816` is last season's league with the same managers.
-Nothing carries over (redraft), but its **completed draft is replayable data** — it answers
-SPEC §9.6's dress-rehearsal question and could seed per-coach priors with observed behaviour
-instead of a generic prior. Not fetched yet.
+Its completed draft (`1275683545217503232`) **is fetched and used**: it calibrated the draft
+advisor's survival model (see M5) and shows per-coach tendencies (cyapp1 reaches ~25%).
 
 ### Blockers, in priority order
 
-1. **The user's draft slot is still unknown.** The draft is scheduled (`start_time` =
-   2026-10-18 18:00 local) but `draft_order` is still null as of 2026-10-16. The commissioner
-   may randomise it at draft time, so the live advisor must work without knowing the slot in
-   advance and pick it up from the first picks. `pick_timer` is 90s, which is the budget the
-   live advisor has to beat.
+1. **No in-season tooling, and week 1 starts 2026-10-20.** M6 (nightly lock advisor) is not
+   started; until it exists, lock decisions are the user's alone.
 2. **Both `scoring_ambiguities` remain unresolved** (`bonuses_stack`, `td_includes_dd`). Per
    SPEC §4 the empirical fix is to recompute real week-1 box scores and diff against Sleeper's
    own totals, which is impossible before the season opens. Both branches stay behind flags.
-   Resolving them is a one-line config change, not a code change.
+   Resolving them is a one-line config change, not a code change. **Do this after week 1's
+   first games** -- it is now possible, and M6's thresholds depend on it.
 
 ### What the live league changed vs docs/SPEC.md
 
@@ -329,7 +328,7 @@ mechanism instead of comparing against an arbitrary baseline:
 
 ### Still owed from earlier milestones
 
-The next step (a cut-down M5) is at the end of this section, after the pre-draft fixes.
+What to do next is in "Next steps, in order" at the end of this section.
 
 - **Supabase is not set up.** No `.env`, so `ingest_history` writes parquet only and says so.
   TASKS M2 asks for parquet *and* Supabase; that half is deferred, not done.
@@ -446,13 +445,94 @@ drafting by Sleeper's, so it shows the plumbing works, not that the model is rig
   position everyone still needs late.
 - `enforce_position_limits` is on in the draft settings; the limits themselves are unknown.
 
-**Draft day (user):** rerun `ingest_history` and `build_board` (fresh injury statuses and
-ADP), copy `data/board/board.html` to the phone, then `draft_live` with no arguments and open
-`data/draft/live.html`.
+### The draft (2026-10-18)
 
-**After the draft:** per-coach priors from the 2025 picks, positional need, bench/injury
-value, blocking/denial (re-examine SPEC §6.3's double-double-bigs exception first), Supabase,
-the React/Vercel app, the spec rewrite.
+**Preparation the same day.** Re-ran `ingest_history` and `build_board`: NBA final roster cuts
+had landed since Friday, so Sleeper's on-a-team count was 565 and the valued pool fell from 565
+to 506 -- real movement, not a bug; the top-200 safety net stayed empty. Checked and clean:
+`verify_league` exit 0; no traded picks (`/draft/{id}/traded_picks` and
+`/league/{id}/traded_picks` both `[]`, `draft_pick_trading` false). A scripted mid-draft outage
+(real `draft_live.main()` against a fake Sleeper: ok, 4 failed polls, ok) kept the last state
+with the red banner, then recovered and jumped 20 picks correctly. **Found: the laptop sleeps
+after 3 minutes idle on battery** (`powercfg` DC standby 180 s; AC is 3 h) -- the user plugged
+in. Not changed on purpose that close to the draft: the rookie blend and an age adjustment.
+
+**Second mock** (`1417673165013852160`, user drafting by hand on the real clock, advisor run
+from his own terminal): advisor tracked all 104 picks, the user took its #1 recommendation 13
+of 13 times. It produced almost the same roster as the first mock -- old, and with four guard
+bench players and no backup centre, because bench gain is zero. The user was told to take a
+centre late when one was in the top three; he did in the real draft (Vucevic).
+
+**The real draft.** Slot 1 (order set at ~18:00, the advisor picked it up from `draft_order`).
+Final roster: starters Jokic, Jaylen Brown, Durant, Bam Adebayo, Kawhi, Lillard, LeBron,
+Kyrie, Keyonte George; bench DeRozan, Saddiq Bey, Vucevic, Caleb Wilson. Every slot filled,
+three C-eligible.
+
+How the eight teams compare (lineup VOR is our model; median ADP is Sleeper's market view,
+lower = more highly rated):
+
+| Manager | Slot | Lineup VOR | Weekly lock-in pts | Median ADP | Avg age | 33+ |
+|---|---|---|---|---|---|---|
+| **Squ33gee** | 1 | **107.8** | **486.2** | 79.6 | **31.8** | **7** |
+| gilbobo | 3 | 70.3 | 446.7 | 33.3 | 26.5 | 1 |
+| ChickenJoe2107 | 4 | 60.4 | 438.3 | 52.0 | 26.5 | 0 |
+| cyapp1 | 8 | 60.3 | 434.1 | 76.2 | 27.8 | 3 |
+| aala1aala2 | 6 | 49.7 | 428.5 | 51.6 | 27.3 | 0 |
+| amancito | 7 | 45.3 | 413.3 | 45.3 | 27.0 | 1 |
+| 2jake4davis6 | 5 | 37.2 | 407.1 | 46.6 | 25.9 | 0 |
+| tristantro | 2 | 40.4 | 392.3 | 55.0 | 25.1 | 1 |
+
+Read it honestly: the model's edge (~+40 lineup pts a week over gilbobo) is measured with the
+model's own valuation, so it is an upper bound. **The market rates this roster lowest and it is
+the oldest by five years** -- LeBron 41, Durant 38, DeRozan 37, Lillard 36 (Achilles), Kawhi
+35, Vucevic 35, Kyrie 34. Lock-In makes the odd rest day cheap; it does not protect against
+long injuries, and the model has no age decline term. gilbobo (Luka, Booker, AD, Jalen
+Johnson, Chet; median ADP 33) is the threat by both measures. tristantro drafted Kendrick
+Perkins, a retired player.
+
+**Open incident: the advisor stopped at 18:31** during the real draft (page last written
+18:31:08, pick 38 on the clock). Sleeper was reachable from the same machine, and
+`build_view` ran cleanly on the exact live state (0.13 s), so it was not the data. The user
+restarted it and it ran to the end. No traceback has been captured; until one is, the cause is
+unknown -- the process died or hung. Candidates: an exception outside the fetch `try` (in
+`manager_names_by_slot`, `build_view` or `render_html`) would kill the loop. **Fix before the
+next live use: wrap the per-poll body, not only the fetch, so one bad poll logs and
+continues.**
+
+### Measured after the mock, not yet acted on: rookies
+
+Backtested on the 2024-25 and 2025-26 rookie classes (116 rookies, 30 with real ADP), using
+only pre-season information, against actual fp/game:
+
+| Method | r (all) | MAE | r (ADP subset) |
+|---|---|---|---|
+| current: cohort at projected minutes | 0.33 | 6.9 | 0.38 |
+| preseason fp/min x projected minutes | 0.46 | 7.6 | 0.39 |
+| blend, preseason rate shrunk to cohort (60-min prior) | 0.44 | 6.8 | 0.43 |
+| Sleeper ADP alone (log-linear, out-of-season) | -- | -- | 0.39 |
+
+All weak; minutes are the bottleneck (projected vs actual minutes r = 0.35) and every method
+missed Flagg by ~15 fp. The blend is a small real improvement, ~30 min to implement with
+tests, and was **deliberately not shipped before the draft**. It matters again only for
+waiver decisions on rookies. Preseason logs for 2024-25 and 2025-26 are now on disk
+(`preseason_logs_{season}.parquet`), fetched for this backtest.
+
+**Never backtest against Sleeper's past "projections"**: the 2025 rows are actual 2025-26
+output overwritten after the season (r = 1.000 for rookies). ADP in the same rows is genuinely
+pre-season. Recorded in `engine/ingest/sleeper.py`.
+
+### Next steps, in order
+
+1. **M6, the nightly lock advisor** (TASKS M6), for week 1 starting 2026-10-20. Needs the
+   user's roster from `/league/{id}/rosters` (roster_id 4) and each night's games and box
+   scores; `lockin.py` already computes the thresholds.
+2. **Resolve the two scoring ambiguities** from week 1's real box scores vs Sleeper's totals.
+3. **Harden `draft_live`'s loop** (see the open incident) -- cheap, and it is the pattern the
+   nightly job's loop should copy.
+4. Age decline term in the distributions -- this roster is the reason.
+5. Per-coach draft priors, positional need, bench/injury value, blocking/denial (re-examine
+   SPEC §6.3's double-double-bigs exception first) -- next season's draft.
+6. Supabase, the React/Vercel app, the spec rewrite (no IR, FAAB, two divisions).
 
 ## Stack
 
