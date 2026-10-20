@@ -27,6 +27,7 @@ Everything here is a pure function of a distribution object. No I/O, no network,
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from typing import Protocol, runtime_checkable
 
 
@@ -50,29 +51,53 @@ class ScoreDistribution(Protocol):
         """``E[max(X, threshold)]`` **conditional on playing**."""
 
 
-def roll_on_values(distribution: ScoreDistribution, n_games: int) -> list[float]:
+def _game_p_plays(
+    distribution: ScoreDistribution, n_games: int, p_play_by_game: Sequence[float] | None
+) -> list[float]:
+    """One ``p_play`` per game: the distribution's own for every game, unless a list is given."""
+    if p_play_by_game is None:
+        p_plays = [distribution.p_play] * n_games
+    else:
+        p_plays = [float(p) for p in p_play_by_game]
+        if len(p_plays) != n_games:
+            raise ValueError(
+                f"p_play_by_game has {len(p_plays)} entries for a {n_games}-game week"
+            )
+    for p_play in p_plays:
+        if not 0.0 <= p_play <= 1.0:
+            raise ValueError(f"p_play must be in [0, 1], got {p_play}")
+    return p_plays
+
+
+def roll_on_values(
+    distribution: ScoreDistribution,
+    n_games: int,
+    p_play_by_game: Sequence[float] | None = None,
+) -> list[float]:
     """``[W_1, ..., W_{n+1}]`` -- the value of entering each game with nothing locked yet.
 
     ``W_{i+1}`` is the lock threshold for game ``i``: the value of passing on it. The last
     element is 0 by definition (the week is over and nothing was locked).
+
+    ``p_play_by_game``, if given, is the probability he plays each of games ``1..n`` in order,
+    replacing ``distribution.p_play`` -- a back-to-back second night is less likely than an
+    ordinary one (``distributions.game_p_play``). Left as ``None``, every game uses the
+    distribution's single rate, which is exactly the SPEC §5.2 recursion.
     """
     if n_games < 0:
         raise ValueError(f"n_games must be >= 0, got {n_games}")
+    p_plays = _game_p_plays(distribution, n_games, p_play_by_game)
     if n_games == 0:
         return [0.0]
-
-    p_play = distribution.p_play
-    if not 0.0 <= p_play <= 1.0:
-        raise ValueError(f"p_play must be in [0, 1], got {p_play}")
 
     # W_{n+1} = 0, and the final game is forced: there is no decision left to make, so its
     # value is E[X_n] rather than E[max(X_n, 0)]. Those differ only when a score can be
     # negative -- which it can, on a line with turnovers and little else -- and using the
     # recursion here would quietly assume the auto-lock fallback protects you from that. It
     # does not.
-    values = [0.0, p_play * distribution.mean()]
+    values = [0.0, p_plays[-1] * distribution.mean()]
 
-    for _ in range(n_games - 1):
+    for p_play in reversed(p_plays[:-1]):
         roll_on = values[-1]
         hold = p_play * distribution.expected_max(roll_on) + (1.0 - p_play) * roll_on
         values.append(hold)
@@ -80,23 +105,35 @@ def roll_on_values(distribution: ScoreDistribution, n_games: int) -> list[float]
     return list(reversed(values))
 
 
-def weekly_value(distribution: ScoreDistribution, n_games: int) -> float:
+def weekly_value(
+    distribution: ScoreDistribution,
+    n_games: int,
+    p_play_by_game: Sequence[float] | None = None,
+) -> float:
     """``W_1``: what this player is worth in a week containing ``n_games`` games."""
-    return roll_on_values(distribution, n_games)[0]
+    return roll_on_values(distribution, n_games, p_play_by_game)[0]
 
 
-def lock_threshold(distribution: ScoreDistribution, games_remaining_after_this: int) -> float:
+def lock_threshold(
+    distribution: ScoreDistribution,
+    games_remaining_after_this: int,
+    p_play_by_game: Sequence[float] | None = None,
+) -> float:
     """The score tonight's game must beat to be worth locking.
 
     ``games_remaining_after_this`` is how many further games he has this week **after** the
     one just played. Zero means this was his last -- nothing to roll on to, so any score is
     worth keeping and the threshold is the smallest possible number.
+
+    ``p_play_by_game``, if given, covers those **remaining** games only, in order.
     """
     if games_remaining_after_this < 0:
         raise ValueError("games_remaining_after_this must be >= 0")
     if games_remaining_after_this == 0:
+        if p_play_by_game:
+            raise ValueError("p_play_by_game given for a week with no games left")
         return float("-inf")
-    return weekly_value(distribution, games_remaining_after_this)
+    return weekly_value(distribution, games_remaining_after_this, p_play_by_game)
 
 
 def marginal_value_of_a_game(distribution: ScoreDistribution, n_games: int) -> float:

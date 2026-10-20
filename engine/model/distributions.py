@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
+from datetime import date
 
 import numpy as np
 import pandas as pd
@@ -40,6 +41,60 @@ DEFAULT_PRIOR_STRENGTH_GAMES = 20.0
 # Below this many games, a player's own history cannot carry a projection on its own and the
 # board must flag him (SPEC §5.3 wants "a flag for players whose history is unreliable").
 MIN_GAMES_FOR_RELIABLE_HISTORY = 20
+
+# How much less often a player appears on the second night of a back-to-back, by age at the
+# game date. Measured 2026-10-19 on 2023-26 logs, rotation players only (20+ min that season),
+# 57,769 player-games, same per-stint windows as ``availability``:
+#
+#     age    other nights          B2B 2nd night         ratio
+#     <30    0.838 (n=37,314)      0.796 (n=8,096)       0.951
+#     30-33  0.835 (n=6,873)       0.753 (n=1,514)       0.901
+#     34+    0.867 (n=3,268)       0.761 (n=704)         0.879
+#
+# It is rest, not lingering injury: conditional on playing the previous game the ratios are
+# 0.951 / 0.923 / 0.881. And it must be a multiplier on B2B nights, not an age penalty on
+# p_play overall -- 34+ rotation players are *more* available on ordinary nights (survivors).
+# Each entry is (lowest age in the band, ratio); a player's band is the last one he reaches.
+B2B_AVAILABILITY_RATIO_BY_AGE: tuple[tuple[int, float], ...] = (
+    (0, 0.951),
+    (30, 0.901),
+    (34, 0.879),
+)
+
+
+def age_on(birth_date: date, day: date) -> int:
+    """Whole years old on ``day``."""
+    return day.year - birth_date.year - ((day.month, day.day) < (birth_date.month, birth_date.day))
+
+
+def b2b_availability_ratio(age: int) -> float:
+    """The measured B2B second-night multiplier for a player of this age."""
+    ratio = B2B_AVAILABILITY_RATIO_BY_AGE[0][1]
+    for lowest_age, band_ratio in B2B_AVAILABILITY_RATIO_BY_AGE:
+        if age >= lowest_age:
+            ratio = band_ratio
+    return ratio
+
+
+def game_p_play(base_p_play: float, b2b_second: bool, age: int | None) -> float:
+    """``p_play`` for one specific game.
+
+    ``base_p_play`` is the player's own historical rate (``availability``). On the second night
+    of a back-to-back it is multiplied by his age band's measured ratio; on any other night it
+    is unchanged.
+
+    ``age=None`` means his age is unknown, and then the game is left at the base rate rather
+    than charged a guessed band. Callers must surface that as a gap -- an unknown age means the
+    back-to-back is *not* priced, which is a different claim from "it does not matter".
+
+    Known approximation: the base rate already averages over his B2B nights (~18% of games),
+    so ordinary nights are understated by about ``0.18 x (1 - ratio)`` -- at most ~2% for 34+.
+    """
+    if not 0.0 <= base_p_play <= 1.0:
+        raise ValueError(f"base_p_play must be in [0, 1], got {base_p_play}")
+    if not b2b_second or age is None:
+        return base_p_play
+    return base_p_play * b2b_availability_ratio(age)
 
 
 @dataclass(frozen=True)

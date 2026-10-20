@@ -23,8 +23,9 @@ prints the same to the terminal. Read-only: change lineups and lock scores in th
 
 Known limits, stated rather than hidden:
 
-* ``p_play`` is one rate per player, the same for every game. A back-to-back second night is
-  flagged but not yet priced in (TASKS / CLAUDE.md next step 2).
+* A back-to-back second night is priced by **age band only** (``distributions.game_p_play``:
+  x0.951 under 30, x0.901 at 30-33, x0.879 at 34+). A player's own B2B habits are not used
+  yet; a player with no birth date in Sleeper gets no B2B adjustment and is flagged.
 * The schedule has game dates, not tip-off times, so deadlines are by date: lock before his
   next game *date*. Exact tip times are the nightly job's problem.
 * Sleeper injury designations are shown next to the name but do not change the numbers.
@@ -47,6 +48,7 @@ from engine.ingest.nba_stats import DATA_DIR, previous_seasons, regular_season_g
 from engine.ingest.sleeper import Roster, SleeperClient
 from engine.jobs.build_board import load_logs
 from engine.model.lineup import assign_lineup, slot_position, starting_slots
+from engine.model.distributions import age_on, game_p_play
 from engine.model.lockin import ScoreDistribution, lock_threshold, weekly_value
 from engine.model.player_model import PlayerModel
 
@@ -109,13 +111,42 @@ def week_for(weeks: pd.DataFrame, today: date) -> int:
 # --- the numbers ----------------------------------------------------------------------------------
 
 
-def game_thresholds(distribution: ScoreDistribution, n_games: int) -> list[float]:
+def game_thresholds(
+    distribution: ScoreDistribution, n_games: int, p_play_by_game: list[float] | None = None
+) -> list[float]:
     """Lock threshold after each of ``n_games`` games; the last is ``-inf`` (nothing to roll to).
 
     Game ``i`` (1-based) leaves ``n_games - i`` games to roll on to, and the threshold is the
-    value of those: ``lock_threshold(distribution, n_games - i)``.
+    value of those: ``lock_threshold(distribution, n_games - i)``, with the per-game ``p_play``
+    of exactly those remaining games.
     """
-    return [lock_threshold(distribution, n_games - i) for i in range(1, n_games + 1)]
+    return [
+        lock_threshold(
+            distribution,
+            n_games - i,
+            None if p_play_by_game is None else p_play_by_game[i:],
+        )
+        for i in range(1, n_games + 1)
+    ]
+
+
+def games_p_play(base_p_play: float, games: list[GameSlot], birth_date: date | None) -> list[float]:
+    """``p_play`` for each of his games this week: lower on a B2B second night, by his age then."""
+    return [
+        game_p_play(
+            base_p_play,
+            game.b2b_second,
+            None if birth_date is None else age_on(birth_date, game.game_date),
+        )
+        for game in games
+    ]
+
+
+def parse_birth_date(text: str | None) -> date | None:
+    try:
+        return date.fromisoformat(text) if text else None
+    except ValueError:
+        return None
 
 
 @dataclass
@@ -128,9 +159,11 @@ class PlayerSheet:
     p_play: float
     mean: float
     games: list[GameSlot]
+    game_p_play: list[float]  # per game; below p_play on a B2B second night
     thresholds: list[float]
     week_value: float  # expected lock-in value this week if started
     in_sleeper_lineup: bool
+    age: int | None  # at his first game this week; None = no birth date, B2B not priced
     recommended_slot: str | None = None  # slot type if in the recommended nine, else None
 
     @property
@@ -145,8 +178,10 @@ class PlayerSheet:
         if self.last_game_b2b:
             out.append(
                 "AUTO-LOCK TRAP: his last game is the 2nd night of a back-to-back -- "
-                "the most likely game to sit, and it scores 0 if he does"
+                f"plays only {self.game_p_play[-1]:.0%}, and it scores 0 if he sits"
             )
+        if self.age is None and any(g.b2b_second for g in self.games):
+            out.append("no birth date in Sleeper: back-to-back NOT priced into these numbers")
         if self.injury:
             out.append(f"Sleeper status: {self.injury}")
         return out
@@ -161,7 +196,9 @@ def build_sheet(
     injury: str,
     games: list[GameSlot],
     in_sleeper_lineup: bool,
+    birth_date: date | None,
 ) -> PlayerSheet:
+    p_plays = games_p_play(distribution.p_play, games, birth_date)
     return PlayerSheet(
         sleeper_id=sleeper_id,
         name=name,
@@ -171,9 +208,11 @@ def build_sheet(
         p_play=distribution.p_play,
         mean=distribution.mean(),
         games=games,
-        thresholds=game_thresholds(distribution, len(games)),
-        week_value=weekly_value(distribution, len(games)),
+        game_p_play=p_plays,
+        thresholds=game_thresholds(distribution, len(games), p_plays),
+        week_value=weekly_value(distribution, len(games), p_plays),
         in_sleeper_lineup=in_sleeper_lineup,
+        age=None if birth_date is None or not games else age_on(birth_date, games[0].game_date),
     )
 
 
@@ -226,9 +265,10 @@ def render_terminal(sheets: list[PlayerSheet], week: int, gaps: list[str]) -> st
         lines.append(
             f"\n{role:4} {sheet.name} ({sheet.team}, {'/'.join(sheet.positions)})  "
             f"week value {sheet.week_value:.1f}, plays {sheet.p_play:.0%}"
+            f"{'' if sheet.age is None else f', age {sheet.age}'}"
         )
-        for game, threshold in zip(sheet.games, sheet.thresholds):
-            b2b = "  B2B 2nd night" if game.b2b_second else ""
+        for game, threshold, p_play in zip(sheet.games, sheet.thresholds, sheet.game_p_play):
+            b2b = f"  B2B 2nd night, plays {p_play:.0%}" if game.b2b_second else ""
             lines.append(f"     {_day(game.game_date):9} {game.label:7} {_threshold_text(threshold)}{b2b}")
         for warning in sheet.warnings:
             lines.append(f"     !! {warning}")
@@ -250,9 +290,9 @@ def render_html(sheets: list[PlayerSheet], week: int, week_dates: str, gaps: lis
     for sheet in sheets:
         rows = "".join(
             f"<tr class='{'b2b' if g.b2b_second else ''}'><td>{esc(_day(g.game_date))}</td>"
-            f"<td>{esc(g.label)}{' <span class=tag>B2B</span>' if g.b2b_second else ''}</td>"
+            f"<td>{esc(g.label)}{f' <span class=tag>B2B</span> <span class=mut>plays {p:.0%}</span>' if g.b2b_second else ''}</td>"
             f"<td class=num><b>{esc(_threshold_text(t))}</b></td></tr>"
-            for g, t in zip(sheet.games, sheet.thresholds)
+            for g, t, p in zip(sheet.games, sheet.thresholds, sheet.game_p_play)
         ) or "<tr><td colspan=3 class=mut>no games this week</td></tr>"
         warns = "".join(f"<div class=warn>{esc(w)}</div>" for w in sheet.warnings)
         role = sheet.recommended_slot or "BN"
@@ -264,7 +304,8 @@ def render_html(sheets: list[PlayerSheet], week: int, week_dates: str, gaps: lis
             f"<div class=hd><span class=slot>{esc(role)}</span> <b>{esc(sheet.name)}</b> "
             f"<span class=mut>{esc(sheet.team)} &middot; {esc('/'.join(sheet.positions))}</span>{sleeper_note}</div>"
             f"<div class=mut>week value {sheet.week_value:.1f} &middot; {sheet.mean:.0f} fp/g when he plays "
-            f"&middot; plays {sheet.p_play:.0%} of games</div>"
+            f"&middot; plays {sheet.p_play:.0%} of games"
+            f"{'' if sheet.age is None else f' &middot; age {sheet.age}'}</div>"
             f"<table>{rows}</table>{warns}</div>"
         )
     gap_block = "".join(f"<div class=warn>GAP: {esc(g)}</div>" for g in gaps)
@@ -297,7 +338,8 @@ tr.b2b td{{color:var(--warn)}}
 <div class=mut>{esc(week_dates)} &middot; generated {esc(generated)} &middot; works offline</div>
 <div class=how>After each game, <b>lock the score if it is at least the number shown</b> &mdash; that is
 what rolling on to his remaining games is worth. The final game is taken automatically if nothing is
-locked, and scores <b>0 if he sits</b>. <span class=tag>B2B</span> = second night of a back-to-back.</div>
+locked, and scores <b>0 if he sits</b>. <span class=tag>B2B</span> = second night of a back-to-back,
+priced in: less likely to play, more so with age.</div>
 {lineup_block}{gap_block}
 <div class=grid>{''.join(cards)}</div>
 </body></html>"""
@@ -369,6 +411,7 @@ def main() -> int:
                 (player.injury_status or "") if player else "",
                 team_week_games(schedule, team, week),
                 sleeper_id in starters,
+                parse_birth_date(player.birth_date if player else None),
             )
         )
 

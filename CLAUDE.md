@@ -40,9 +40,10 @@ ends with the user taking the action in the Sleeper app.
 **The draft is done** (Sunday 2026-10-18, see "The draft" below). **Phase 3 (in-season) has
 started**, following a seven-step plan the user set on 2026-10-19 (see "Phase 3 plan and
 status" at the end of this section). **Step 1 is done**: a week-1 lock cheat sheet
-(`lock_sheet.py`). **Step 2 is measured but not wired in**: back-to-back second nights cost
-real availability, growing with age; the user has to choose band-only vs a per-player blend
-before it is wired. The season opens Tuesday 2026-10-20.
+(`lock_sheet.py`). **Step 2 is wired in (age-band ratio only, the user's choice)**: a
+back-to-back second night lowers that game's `p_play` by the measured ratio for the player's
+age on the game date, which lowers the lock thresholds before it. The per-player blend is a
+later, separate step. The season opens Tuesday 2026-10-20.
 
 **Working agreement for phase 3:** do the steps in order and **stop after each one** for the
 user to review. Commits are `phase3: <what>`. The user asks before anything is committed or
@@ -51,7 +52,7 @@ pushed.
 Everything runnable today, in the order you would use it:
 
 ```
-uv run pytest                                             # 294 tests, none need the network
+uv run pytest                                             # 318 tests, none need the network
 uv run python -m engine.jobs.verify_league                # config vs live Sleeper; exits 1 on drift
 uv run python -m engine.jobs.ingest_history [--force]     # LOCAL ONLY: logs + schedule -> parquet
 uv run python -m engine.jobs.build_board [--top 150]      # -> data/board/{board.csv,board.html,pool.csv}
@@ -62,8 +63,8 @@ uv run python -m engine.jobs.draft_live [--draft-id <mock id>] [--slot N] # -> d
 uv run python -m engine.jobs.lock_sheet [--week N]                      # -> data/lock/lock_sheet.html
 ```
 
-Per-file test counts: scoring 89, lockin 29, distributions 27, nba_stats 26, lineup 25,
-player_ids 22, draft_sim 29, rookies 14, lock_sheet 12, valuation 11, draft_live 10.
+Per-file test counts: scoring 89, distributions 38, lockin 37, nba_stats 26, lineup 25,
+player_ids 22, draft_sim 29, lock_sheet 17, rookies 14, valuation 11, draft_live 10.
 
 `data/` is gitignored and regenerable. **On a fresh checkout run `ingest_history` then
 `build_board` before anything else** -- the 2026-10-16 session started with no `data/` at all.
@@ -554,12 +555,12 @@ pre-season. Recorded in `engine/ingest/sleeper.py`.
   players disappeared only because they were waived overnight).
 - **`SleeperClient.get_rosters_live`** -- `get_rosters` caches forever, which is wrong
   in-season. The user's roster: `owner_id` = his `user_id`, `roster_id` 4.
-- Known limits: one `p_play` per player (step 2 fixes); the schedule parquet has dates, not
+- Known limits: the schedule parquet has dates, not
   tip times (`normalize_schedule` drops them -- M6 needs them for real deadlines); Sleeper
   injury status is shown but does not change numbers; the lineup advice is weekly although
   Sleeper allows changes before each game.
 
-### Phase 3 step 2 — back-to-back availability (measured, NOT wired in)
+### Phase 3 step 2 — back-to-back availability (wired in 2026-10-19, band ratio only)
 
 Measured on 2023-26 logs, rotation players only (20+ min that season), 57,769 player-games,
 using the same per-stint windows as `p_play`. Team schedules are reconstructed from the logs;
@@ -583,22 +584,42 @@ names dropped). Analysis script was ad hoc (scratchpad), not committed -- re-der
   0.79 vs 0.89, Jokic 0.80 vs 0.89, Durant 0.88 vs 0.91, DeRozan 0.93 vs 0.96, Vucevic 0.93
   vs 0.86, Bam 0.89 vs 0.91, George 0.82 vs 0.86, Bey 0.88 vs 0.96.
 
-**Proposed wiring, awaiting the user's go-ahead:** (1) `distributions.py`: per-game `p_play` =
-base `p_play` x band ratio on B2B second nights, age at the game date; (2) `lockin.py`: an
-optional per-game `p_play` list in `roll_on_values` / `weekly_value` / `lock_threshold`,
-defaulting to today's behaviour so the closed-form regression stays green; (3) `lock_sheet`
-passes each game's B2B flag; (4) tests: a 34+ player's B2B night lowers his continuation
-value, regression green, mutation checks. **Open decision for the user:** band ratio only (his
-spec, and the recommendation to start with) vs also shrinking each player's own B2B ratio
-toward the band by sample size (prices Kyrie/Kawhi/LeBron harsher, Durant softer).
+**How it is wired.** The user chose the **band ratio only**; the per-player blend (shrinking
+each player's own B2B ratio toward the band by sample size -- harsher on Kyrie/Kawhi/LeBron,
+softer on Durant) is deferred to its own step.
+
+- `distributions.py`: `B2B_AVAILABILITY_RATIO_BY_AGE` (the table above), `age_on`,
+  `game_p_play(base, b2b_second, age)` = base x ratio on a B2B second night, base otherwise.
+  Age is taken **on the game date** (Jaylen Brown turns 30 on 2026-10-24, so his Sunday game
+  takes the 30-33 ratio). `age=None` leaves the game unpriced and the sheet flags it -- never a
+  guessed band. Ages come from Sleeper `birth_date` (now on the `Player` model).
+- `lockin.py`: `roll_on_values` / `weekly_value` / `lock_threshold` take an optional
+  `p_play_by_game`; `None` is the old recursion exactly (regression green). For
+  `lock_threshold` the list covers the *remaining* games only.
+- `lock_sheet.py`: per-game `p_play` feeds the thresholds **and the week value**, so it also
+  moves the lineup; B2B rows and the trap warning quote the priced chance he plays.
+- Known approximation: base `p_play` already averages over B2B nights (~18% of games), so
+  ordinary nights are understated by ~0.18 x (1 - ratio), at most ~2%. Not corrected.
+- **The board and draft season values do not use it** (`season_value` still takes game counts
+  only). Fine post-draft; worth adding when waiver ranking (step 7) needs per-week values.
+- Tests: 24 new; 8 mutations each fail the suite (ratio on every night, recursion ignoring the
+  list, final game ignoring its own p, list reversed, 34+ band at 35, threshold sliced at the
+  game just played, age at week start, week value ignoring B2B).
+
+Week 1 effect on the user's roster (same nine starters recommended before and after):
+Kyrie's Sat B2B is now 67% to play, LeBron's Sun 76%, Brown's Sun 77% (he is 30 by then),
+Durant's Sat 79%. Thresholds before those games fall 1-5 points (Durant Fri 44.1 -> 38.8,
+LeBron Sat 38.7 -> 34.0, Kyrie Fri 34.8 -> 30.6); starting nine week value 482.9 -> 478.8.
 
 ### Phase 3 plan and status (set by the user 2026-10-19; stop after each step)
 
 1. ~~Week-1 lock cheat sheet~~ -- **done** (above).
-2. **Back-to-back `p_play`** -- measured (above); wire in after the user's decision.
+2. ~~Back-to-back `p_play`~~ -- **done**, band ratio only (above).
 3. **Harden the poll loop** (the 18:31 incident): in `draft_live.py` wrap the *whole*
    per-poll body, log tracebacks to `data/logs/`, keep looping; a test that raises inside
-   `build_view` and asserts the loop survives. The nightly job copies the pattern.
+   `build_view` and asserts the loop survives. The nightly job copies the pattern. Also: job
+   output crashes when redirected to a file (Windows cp1252 cannot encode "Vučević";
+   `lock_sheet > out.txt` dies) -- make stdout UTF-8 so logs and scheduled runs work.
 4. **M6 nightly advisor** (TASKS M6): probe the matchups endpoint for lock status first (rule
    6) -- if absent, infer it and add manual confirmation; `matchup.py` weekly win-probability
    sim vs this week's opponent; `nightly.py` LOCK/ROLL per started player with a one-line

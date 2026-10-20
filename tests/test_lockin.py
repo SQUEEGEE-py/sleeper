@@ -220,3 +220,49 @@ def test_season_value_counts_bye_weeks(normal: NormalScoreDistribution) -> None:
 def test_season_value_needs_a_schedule(normal: NormalScoreDistribution) -> None:
     with pytest.raises(ValueError, match="empty"):
         season_value(normal, [])
+
+
+# --- per-game p_play (back-to-back second nights) ---------------------------------------------
+
+
+@pytest.mark.parametrize("n_games", [1, 2, 3, 4])
+def test_a_constant_per_game_list_is_the_scalar_recursion(n_games: int) -> None:
+    """Passing the same p_play for every game must change nothing: the default path and the
+    list path are one recursion, not two."""
+    player = NormalScoreDistribution(45.0, 10.0, 0.85)
+    assert roll_on_values(player, n_games, [0.85] * n_games) == pytest.approx(
+        roll_on_values(player, n_games)
+    )
+
+
+def test_a_less_likely_game_lowers_the_value_of_reaching_it_and_nothing_after() -> None:
+    """Game 3 of 4 becomes a B2B second night. Every W up to and including entering game 3
+    falls; W_4 (entering game 4) is about game 4 alone and must not move."""
+    player = NormalScoreDistribution(45.0, 10.0, 0.9)
+    plain = roll_on_values(player, 4, [0.9, 0.9, 0.9, 0.9])
+    b2b = roll_on_values(player, 4, [0.9, 0.9, 0.9 * 0.879, 0.9])
+    assert b2b[0] < plain[0] and b2b[1] < plain[1] and b2b[2] < plain[2]
+    assert b2b[3] == pytest.approx(plain[3]) and b2b[4] == 0.0
+
+
+def test_the_final_games_p_play_is_the_auto_lock_fallback() -> None:
+    """The final game is worth p_n * E[X]: if he sits it, the fallback pays 0."""
+    values = roll_on_values(NormalScoreDistribution(45.0, 10.0), 3, [1.0, 1.0, 0.5])
+    assert values[2] == pytest.approx(22.5)
+
+
+def test_lock_threshold_takes_the_remaining_games_p_play() -> None:
+    player = NormalScoreDistribution(45.0, 10.0, 0.9)
+    week = [0.9, 0.8, 0.7]
+    assert lock_threshold(player, 2, week[1:]) == pytest.approx(roll_on_values(player, 3, week)[1])
+    assert lock_threshold(player, 0, []) == float("-inf")
+
+
+def test_per_game_p_play_is_validated() -> None:
+    player = NormalScoreDistribution(45.0, 10.0)
+    with pytest.raises(ValueError, match="entries"):
+        weekly_value(player, 3, [0.9, 0.9])
+    with pytest.raises(ValueError, match=r"\[0, 1\]"):
+        weekly_value(player, 2, [0.9, 1.2])
+    with pytest.raises(ValueError, match="no games left"):
+        lock_threshold(player, 0, [0.9])

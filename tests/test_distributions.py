@@ -9,7 +9,13 @@ import numpy as np
 import pandas as pd
 import pytest
 
+from datetime import date
+
 from engine.model.distributions import (
+    B2B_AVAILABILITY_RATIO_BY_AGE,
+    age_on,
+    b2b_availability_ratio,
+    game_p_play,
     DEFAULT_HALF_LIFE_GAMES,
     MIN_GAMES_FOR_RELIABLE_HISTORY,
     EmpiricalScoreDistribution,
@@ -314,3 +320,41 @@ def test_role_prior_on_an_empty_band() -> None:
     logs = _logs_with_fp(3)
     with pytest.raises(ValueError, match="minute band"):
         role_prior(logs, 44.0, 48.0)
+
+
+# --- back-to-back availability by age --------------------------------------------------------
+
+
+def test_age_turns_over_on_the_birthday() -> None:
+    born = date(1992, 10, 22)
+    assert age_on(born, date(2026, 10, 21)) == 33
+    assert age_on(born, date(2026, 10, 22)) == 34
+
+
+@pytest.mark.parametrize(
+    "age,ratio", [(22, 0.951), (29, 0.951), (30, 0.901), (33, 0.901), (34, 0.879), (41, 0.879)]
+)
+def test_band_ratios_are_the_measured_ones(age: int, ratio: float) -> None:
+    assert b2b_availability_ratio(age) == ratio
+
+
+def test_older_bands_sit_more_often() -> None:
+    ratios = [ratio for _, ratio in B2B_AVAILABILITY_RATIO_BY_AGE]
+    assert ratios == sorted(ratios, reverse=True) and all(r < 1.0 for r in ratios)
+
+
+def test_only_a_b2b_second_night_is_discounted() -> None:
+    """A multiplier on B2B nights, not an age penalty: an old player's ordinary night stays at
+    his own rate (34+ rotation players are *more* available on ordinary nights)."""
+    assert game_p_play(0.9, False, 38) == 0.9
+    assert game_p_play(0.9, True, 38) == pytest.approx(0.9 * 0.879)
+    assert game_p_play(0.9, True, 25) == pytest.approx(0.9 * 0.951)
+
+
+def test_unknown_age_is_left_unpriced_not_guessed() -> None:
+    assert game_p_play(0.9, True, None) == 0.9
+
+
+def test_game_p_play_rejects_a_bad_base_rate() -> None:
+    with pytest.raises(ValueError):
+        game_p_play(1.1, True, 30)

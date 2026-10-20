@@ -111,6 +111,7 @@ class Player(BaseModel):
     status: str | None = None
     injury_status: str | None = None
     active: bool | None = None
+    birth_date: str | None = None  # "YYYY-MM-DD"; absent for some players
 
 
 def _cache_path(cache_dir: Path, key: str) -> Path:

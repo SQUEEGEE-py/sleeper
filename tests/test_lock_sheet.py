@@ -111,9 +111,9 @@ def slot(day: str, b2b: bool = False) -> GameSlot:
 
 
 def sheet(name: str, positions: tuple[str, ...], games: list[GameSlot], mu: float = 45.0,
-          in_lineup: bool = True, injury: str = ""):
+          in_lineup: bool = True, injury: str = "", born: date | None = None):
     return build_sheet(NormalScoreDistribution(mu, 12.0, 0.9), name.lower(), name, "PHI",
-                       positions, injury, games, in_lineup)
+                       positions, injury, games, in_lineup, born)
 
 
 def test_last_game_on_a_back_to_back_is_the_trap() -> None:
@@ -160,3 +160,49 @@ def test_outputs_carry_thresholds_warnings_and_stay_offline() -> None:
         assert "AUTO-LOCK TRAP" in output and "GAP: X: unmapped" in output
     assert "final: auto" in text and "lock ≥" in text
     assert not re.search(r"""(src|href)\s*=\s*["']?(https?:)?//""", page)
+
+
+# --- back-to-back pricing -----------------------------------------------------------------------
+
+OLD = date(1988, 1, 1)  # 38 in October 2026
+YOUNG = date(2004, 1, 1)  # 22
+MIDDLE_B2B = [slot("2026-10-21"), slot("2026-10-23"), slot("2026-10-24", b2b=True), slot("2026-10-26")]
+NO_B2B = [slot("2026-10-21"), slot("2026-10-23"), slot("2026-10-25"), slot("2026-10-27")]
+
+
+def test_a_34_plus_players_b2b_night_lowers_his_continuation_value() -> None:
+    """The point of step 2. With game 3 a B2B second night, rolling on from games 1 and 2 is
+    worth less, so he should lock earlier; the threshold after game 3 (only game 4 left, an
+    ordinary night) is untouched. And an old player is charged more than a young one."""
+    old = sheet("Old", ("SF",), MIDDLE_B2B, born=OLD)
+    young = sheet("Young", ("SF",), MIDDLE_B2B, born=YOUNG)
+    plain = sheet("Plain", ("SF",), NO_B2B, born=OLD)
+    assert old.thresholds[0] < young.thresholds[0] < plain.thresholds[0]
+    assert old.thresholds[1] < young.thresholds[1] < plain.thresholds[1]
+    assert old.thresholds[2] == pytest.approx(plain.thresholds[2])
+    assert old.week_value < young.week_value < plain.week_value
+    assert old.game_p_play == pytest.approx([0.9, 0.9, 0.9 * 0.879, 0.9])
+
+
+def test_a_week_without_a_back_to_back_is_unchanged_by_age() -> None:
+    plain = sheet("Plain", ("SF",), NO_B2B, born=OLD)
+    assert plain.thresholds == game_thresholds(NormalScoreDistribution(45.0, 12.0, 0.9), 4)
+
+
+def test_b2b_is_priced_at_his_age_on_the_game_date() -> None:
+    """Turns 34 on the day of the back-to-back: that game takes the 34+ ratio."""
+    turning = sheet("Birthday", ("SF",), MIDDLE_B2B, born=date(1992, 10, 24))
+    assert turning.age == 33
+    assert turning.game_p_play[2] == pytest.approx(0.9 * 0.879)
+
+
+def test_unknown_birth_date_leaves_b2b_unpriced_and_says_so() -> None:
+    unknown = sheet("Unknown", ("SF",), MIDDLE_B2B)
+    assert unknown.game_p_play == [0.9] * 4
+    assert any("NOT priced" in w for w in unknown.warnings)
+
+
+def test_trap_warning_quotes_the_priced_chance_he_plays() -> None:
+    trapped = sheet("Old", ("SF",), [slot("2026-10-24"), slot("2026-10-25", b2b=True)], born=OLD)
+    assert any("plays only 79%" in w for w in trapped.warnings)  # 0.9 x 0.879
+    assert "B2B 2nd night, plays 79%" in render_terminal(recommend_lineup([trapped], SLOTS), 1, [])
