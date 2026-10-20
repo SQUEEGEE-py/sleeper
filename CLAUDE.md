@@ -37,16 +37,21 @@ ends with the user taking the action in the Sleeper app.
 
 ## Current state (2026-10-19)
 
-**The draft is done** (Sunday 2026-10-18, see "The draft" below). M0-M4 and a cut-down M5
-carried it: the board plus a live advisor the user followed all night. **The season opens
-Tuesday 2026-10-20 and the in-season side (M6, the nightly lock-or-roll advisor) is not
-built.** That is the next job, and with this roster it matters more than usual: deciding when
-to lock old, rest-prone stars is exactly where Lock-In is won or lost.
+**The draft is done** (Sunday 2026-10-18, see "The draft" below). **Phase 3 (in-season) has
+started**, following a seven-step plan the user set on 2026-10-19 (see "Phase 3 plan and
+status" at the end of this section). **Step 1 is done**: a week-1 lock cheat sheet
+(`lock_sheet.py`). **Step 2 is measured but not wired in**: back-to-back second nights cost
+real availability, growing with age; the user has to choose band-only vs a per-player blend
+before it is wired. The season opens Tuesday 2026-10-20.
+
+**Working agreement for phase 3:** do the steps in order and **stop after each one** for the
+user to review. Commits are `phase3: <what>`. The user asks before anything is committed or
+pushed.
 
 Everything runnable today, in the order you would use it:
 
 ```
-uv run pytest                                             # 282 tests, none need the network
+uv run pytest                                             # 294 tests, none need the network
 uv run python -m engine.jobs.verify_league                # config vs live Sleeper; exits 1 on drift
 uv run python -m engine.jobs.ingest_history [--force]     # LOCAL ONLY: logs + schedule -> parquet
 uv run python -m engine.jobs.build_board [--top 150]      # -> data/board/{board.csv,board.html,pool.csv}
@@ -54,10 +59,11 @@ uv run python -m engine.jobs.player_value "Jokic" [--compare "Kawhi" ...]
 uv run python -m engine.jobs.draft_rehearsal [--slot 5] [--drafts 2]   # synthetic drafts, timed
 uv run python -m engine.jobs.draft_rehearsal --calibrate                # 2025 replay -> sigma
 uv run python -m engine.jobs.draft_live [--draft-id <mock id>] [--slot N] # -> data/draft/live.html
+uv run python -m engine.jobs.lock_sheet [--week N]                      # -> data/lock/lock_sheet.html
 ```
 
 Per-file test counts: scoring 89, lockin 29, distributions 27, nba_stats 26, lineup 25,
-player_ids 22, draft_sim 29, rookies 14, valuation 11, draft_live 10.
+player_ids 22, draft_sim 29, rookies 14, lock_sheet 12, valuation 11, draft_live 10.
 
 `data/` is gitignored and regenerable. **On a fresh checkout run `ingest_history` then
 `build_board` before anything else** -- the 2026-10-16 session started with no `data/` at all.
@@ -71,7 +77,8 @@ What exists and works:
   purpose; SPEC §1's `matchup.py` does not exist yet). Real so far: `scoring.py` (M1),
   `nba_stats.py` (M2), `distributions.py` and `lockin.py` (M3), `player_ids.py`, `lineup.py`,
   `valuation.py` and `build_board.py` (M4), `rookies.py` (pre-draft fixes), `draft_sim.py`,
-  `draft_live.py` and `draft_rehearsal.py` (M5, cut down).
+  `draft_live.py` and `draft_rehearsal.py` (M5, cut down), `player_model.py` and
+  `lock_sheet.py` (phase 3 step 1).
 - `engine/ingest/sleeper.py` — typed pydantic client for the SPEC §2.1 endpoints. Every
   response is cached to disk under `data/cache/sleeper/` with a fetch timestamp; `players/nba`
   is TTL-capped at 24h. Reruns and tests never need the network.
@@ -328,7 +335,7 @@ mechanism instead of comparing against an arbitrary baseline:
 
 ### Still owed from earlier milestones
 
-What to do next is in "Next steps, in order" at the end of this section.
+What to do next is in "Phase 3 plan and status" at the end of this section.
 
 - **Supabase is not set up.** No `.env`, so `ingest_history` writes parquet only and says so.
   TASKS M2 asks for parquet *and* Supabase; that half is deferred, not done.
@@ -521,18 +528,99 @@ waiver decisions on rookies. Preseason logs for 2024-25 and 2025-26 are now on d
 output overwritten after the season (r = 1.000 for rookies). ADP in the same rows is genuinely
 pre-season. Recorded in `engine/ingest/sleeper.py`.
 
-### Next steps, in order
+### Phase 3 step 1 — week-1 lock cheat sheet (done 2026-10-19)
 
-1. **M6, the nightly lock advisor** (TASKS M6), for week 1 starting 2026-10-20. Needs the
-   user's roster from `/league/{id}/rosters` (roster_id 4) and each night's games and box
-   scores; `lockin.py` already computes the thresholds.
-2. **Resolve the two scoring ambiguities** from week 1's real box scores vs Sleeper's totals.
-3. **Harden `draft_live`'s loop** (see the open incident) -- cheap, and it is the pattern the
-   nightly job's loop should copy.
-4. Age decline term in the distributions -- this roster is the reason.
-5. Per-coach draft priors, positional need, bench/injury value, blocking/denial (re-examine
-   SPEC §6.3's double-double-bigs exception first) -- next season's draft.
-6. Supabase, the React/Vercel app, the spec rewrite (no IR, FAAB, two divisions).
+`uv run python -m engine.jobs.lock_sheet [--week N]` -> terminal + `data/lock/lock_sheet.html`
+(self-contained, offline) and `lock_sheet_week{N}.html`. 12 fixture tests; four mutations
+(B2B looking forward, threshold off by one, preseason counted, any B2B = trap) each fail it.
+
+- For each rostered player: this week's games (date, opponent, home/away), the lock threshold
+  after each game = `lockin.lock_threshold(dist, games_left_after_it)`, B2B second nights
+  marked, and an **AUTO-LOCK TRAP** warning when his *last* game of the week is a B2B second
+  night (the fallback game, 0 if he sits). Closed-form check pinned: normal(45, 10) over 3
+  games gives thresholds 48.99, 45.0, then automatic.
+- B2B = his team played the previous calendar day, looked up across the whole regular-season
+  schedule, so a Monday after a Sunday in the previous week counts. Preseason is excluded.
+- **Lineup:** recommends the nine starters maximising this week's expected lock-in value
+  (`weekly_value` at his game count, exact assignment via `lineup.assign_lineup`) and lists
+  the changes vs Sleeper's current lineup. Only starters can be locked. On 2026-10-19
+  Sleeper had Lillard and Kyrie benched for Caleb Wilson and Vucevic; the sheet says swap.
+- Week 1 findings: LeBron, Brown (both end Sun vs DET after Sat vs MIL), Durant, Bam and
+  Kyrie all end the week on a B2B second night. Bam was Sleeper DTD.
+- **`engine/model/player_model.py`** now holds the distribution recipe (minutes-band priors,
+  overrides, `PlayerModel.veteran / rookie_at / distribution`), moved out of
+  `build_board.main()` so board, sheet and nightly share one implementation. Verified: every
+  player present before and after has identical values in every `pool.csv` column (three
+  players disappeared only because they were waived overnight).
+- **`SleeperClient.get_rosters_live`** -- `get_rosters` caches forever, which is wrong
+  in-season. The user's roster: `owner_id` = his `user_id`, `roster_id` 4.
+- Known limits: one `p_play` per player (step 2 fixes); the schedule parquet has dates, not
+  tip times (`normalize_schedule` drops them -- M6 needs them for real deadlines); Sleeper
+  injury status is shown but does not change numbers; the lineup advice is weekly although
+  Sleeper allows changes before each game.
+
+### Phase 3 step 2 — back-to-back availability (measured, NOT wired in)
+
+Measured on 2023-26 logs, rotation players only (20+ min that season), 57,769 player-games,
+using the same per-stint windows as `p_play`. Team schedules are reconstructed from the logs;
+ages from Sleeper `birth_date` matched by normalized name (800 of 802 players; 7 duplicate
+names dropped). Analysis script was ad hoc (scratchpad), not committed -- re-derive if needed.
+
+| Age band | Plays, other nights | Plays, B2B 2nd night | Gap | Ratio |
+|---|---|---|---|---|
+| <30 (339 players) | 0.838 (n=37,314) | 0.796 (n=8,096) | -0.041 | 0.951 |
+| 30-33 (73) | 0.835 (n=6,873) | 0.753 (n=1,514) | -0.082 | 0.901 |
+| 34+ (27) | 0.867 (n=3,268) | 0.761 (n=704) | -0.105 | 0.879 |
+
+- Real and age-graded; 95% intervals do not overlap in any band.
+- **It is rest, not lingering injury:** conditional on playing the team's previous game,
+  other nights are ~0.94 in every band and B2B second nights 0.894 / 0.865 / 0.825 (ratios
+  0.951 / 0.923 / 0.881) -- the same picture.
+- **Survivor effect:** 34+ rotation players are *more* available on ordinary nights (0.867).
+  So this must be a multiplier on B2B nights, not a flat age penalty on `p_play`.
+- The user's players, B2B second night vs other nights (24-46 B2B games each, noisy):
+  Kyrie 0.58 vs 0.80, Kawhi 0.68 vs 0.87, LeBron 0.72 vs 0.90, Brown 0.74 vs 0.87, Lillard
+  0.79 vs 0.89, Jokic 0.80 vs 0.89, Durant 0.88 vs 0.91, DeRozan 0.93 vs 0.96, Vucevic 0.93
+  vs 0.86, Bam 0.89 vs 0.91, George 0.82 vs 0.86, Bey 0.88 vs 0.96.
+
+**Proposed wiring, awaiting the user's go-ahead:** (1) `distributions.py`: per-game `p_play` =
+base `p_play` x band ratio on B2B second nights, age at the game date; (2) `lockin.py`: an
+optional per-game `p_play` list in `roll_on_values` / `weekly_value` / `lock_threshold`,
+defaulting to today's behaviour so the closed-form regression stays green; (3) `lock_sheet`
+passes each game's B2B flag; (4) tests: a 34+ player's B2B night lowers his continuation
+value, regression green, mutation checks. **Open decision for the user:** band ratio only (his
+spec, and the recommendation to start with) vs also shrinking each player's own B2B ratio
+toward the band by sample size (prices Kyrie/Kawhi/LeBron harsher, Durant softer).
+
+### Phase 3 plan and status (set by the user 2026-10-19; stop after each step)
+
+1. ~~Week-1 lock cheat sheet~~ -- **done** (above).
+2. **Back-to-back `p_play`** -- measured (above); wire in after the user's decision.
+3. **Harden the poll loop** (the 18:31 incident): in `draft_live.py` wrap the *whole*
+   per-poll body, log tracebacks to `data/logs/`, keep looping; a test that raises inside
+   `build_view` and asserts the loop survives. The nightly job copies the pattern.
+4. **M6 nightly advisor** (TASKS M6): probe the matchups endpoint for lock status first (rule
+   6) -- if absent, infer it and add manual confirmation; `matchup.py` weekly win-probability
+   sim vs this week's opponent; `nightly.py` LOCK/ROLL per started player with a one-line
+   why, ordered by the earliest deadline, matchup-aware (roll more when behind, lock more
+   when ahead); ntfy push (`NTFY_TOPIC` in `.env`); runs locally (stats.nba.com blocks cloud
+   IPs). Needs tip-off times in the schedule.
+5. **Resolve the scoring ambiguities** after the first week-1 games: rescore real box scores
+   through `scoring.py` under every flag combination, diff against Sleeper matchup
+   `players_points`, set `bonuses_stack` / `td_includes_dd` in `config/league.json` with the
+   evidence in the comment fields. Jokic is the most affected player.
+6. **Age + role awareness:** year-over-year fp/game and minutes change by age band from the
+   logs, applied as a *scaling* of the distribution (like `rookies.py`), with before/after
+   values for the user's roster; a team-changer flag (Brown and LeBron to PHI, Kawhi to TOR,
+   ...) comparing current-season minutes/usage to last season once 5+ games exist. No
+   hand-entered overrides.
+7. **Roster management** (after week 1): FAAB bid sizing ($100, no IR, recommend a
+   reserve); trade finder seeded with the forward surplus (Brown, Durant, Kawhi, LeBron,
+   DeRozan, Bey) vs other rosters' needs, a week-19 deadline countdown and a "sell an old
+   player before the week-22 playoffs" flag; fold the measured rookie blend into `rookies.py`.
+
+At the end: update this file's "Current state" and plan, the README, and fix `docs/SPEC.md`
+(delete §7.2 IR, FAAB, two divisions).
 
 ## Stack
 
@@ -579,7 +667,8 @@ pre-season. Recorded in `engine/ingest/sleeper.py`.
 - Pure functions for anything mathematical, so it can be tested without network access.
 - Cache all external API responses to disk with timestamps; never hammer an endpoint in a loop.
 - Every fantasy-point calculation flows through `engine/model/scoring.py`. One implementation.
-- Commit messages: `phase1: <what>`. Keep phases separable, see `docs/TASKS.md`.
+- Commit messages: `phaseN: <what>` for the phase the work belongs to (`phase3:` for
+  in-season work). Keep phases separable, see `docs/TASKS.md`.
 
 ## Testing
 
