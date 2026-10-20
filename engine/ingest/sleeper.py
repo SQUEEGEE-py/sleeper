@@ -180,6 +180,13 @@ class SleeperClient:
         data = self._get(f"/league/{league_id}/rosters", f"rosters_{league_id}")
         return [Roster.model_validate(r) for r in data]
 
+    def get_rosters_live(self, league_id: str) -> list[Roster]:
+        """Rosters, never from cache. ``get_rosters`` caches forever, which was fine before the
+        draft and is wrong in-season: waivers, trades and lineup changes move them daily.
+        ``starters`` is ordered like ``roster_positions`` (PG, SG, G, SF, PF, F, C, C, UTIL)."""
+        data = self._get_fresh(f"/league/{league_id}/rosters", f"rosters_{league_id}")
+        return [Roster.model_validate(r) for r in data]
+
     def get_users(self, league_id: str) -> list[User]:
         data = self._get(f"/league/{league_id}/users", f"users_{league_id}")
         return [User.model_validate(u) for u in data]

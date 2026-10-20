@@ -12,7 +12,6 @@ Reads the parquet written by ``ingest_history`` and the cached Sleeper player di
 from __future__ import annotations
 
 import argparse
-import dataclasses
 import html
 import json
 import sys
@@ -29,23 +28,11 @@ from engine.ingest.player_ids import (
     overrides_by_nba_id,
 )
 from engine.ingest.sleeper import SleeperClient
-from engine.model.distributions import (
-    MIN_GAMES_FOR_RELIABLE_HISTORY,
-    EmpiricalScoreDistribution,
-    build_distribution,
-    role_prior,
-    score_game_logs,
-)
+from engine.model.distributions import EmpiricalScoreDistribution, score_game_logs
 from engine.model.lineup import starting_slots
 from engine.model.lockin import season_value, weekly_value
-from engine.model.rookies import (
-    fit_minutes_projection,
-    preseason_minutes,
-    player_seasons,
-    rookie_cohort_distribution,
-    rookie_discount,
-    rookie_seasons,
-)
+from engine.model.player_model import PlayerModel
+from engine.model.rookies import preseason_minutes
 from engine.model.valuation import PlayerValue, build_board as rank_board
 
 CONFIG_PATH = Path("config/league.json")
@@ -116,49 +103,6 @@ def candidate_players(logs: pd.DataFrame, season: str) -> pd.DataFrame:
     )
     latest_rows["missed_last_season"] = ~latest_rows["nba_player_id"].map(recent_ok)
     return latest_rows
-
-
-# Minutes bands for the role prior (SPEC §5.1 step 3). Minutes are the usable proxy for role:
-# a 34-minute player and a 14-minute player have different distributions whatever their listed
-# position. Bands are wide enough that each holds thousands of games.
-MINUTES_BANDS: tuple[tuple[float, float], ...] = (
-    (0.0, 12.0),
-    (12.0, 18.0),
-    (18.0, 24.0),
-    (24.0, 30.0),
-    (30.0, 36.0),
-    (36.0, 60.0),
-)
-
-
-def build_minutes_priors(logs: pd.DataFrame) -> dict[tuple[float, float], EmpiricalScoreDistribution]:
-    """One prior per minutes band, built once and shared across players."""
-    priors = {}
-    for band in MINUTES_BANDS:
-        try:
-            priors[band] = role_prior(logs, band[0], band[1])
-        except ValueError:
-            continue  # an empty band is fine; nobody will map to it
-    return priors
-
-
-def band_for(minutes: float) -> tuple[float, float]:
-    for band in MINUTES_BANDS:
-        if band[0] <= minutes < band[1]:
-            return band
-    return MINUTES_BANDS[-1]
-
-
-def apply_override(
-    distribution: EmpiricalScoreDistribution, multiplier: float, p_play: float | None
-) -> EmpiricalScoreDistribution:
-    """Scale a distribution for a role change, and/or force availability."""
-    updated = distribution
-    if multiplier != 1.0:
-        updated = dataclasses.replace(updated, values=updated.values * multiplier)
-    if p_play is not None:
-        updated = dataclasses.replace(updated, _p_play=p_play)
-    return updated
 
 
 def render_html(
@@ -322,7 +266,6 @@ def main() -> int:
     preseason_path = args.data_dir / f"preseason_logs_{season}.parquet"
     preseason = pd.read_parquet(preseason_path) if preseason_path.exists() else pd.DataFrame()
     rookies = pd.DataFrame(columns=["nba_player_id", "player_name", "team", "games", "minutes"])
-    projection = None
     if len(preseason):
         summary = preseason_minutes(preseason)
         # Preseason includes exhibitions against non-NBA clubs (London Lions, "LON");
@@ -331,10 +274,7 @@ def main() -> int:
             ~summary["nba_player_id"].isin(logs["nba_player_id"])
             & summary["team"].isin(grid.index)
         ]
-        latest = previous_seasons(season, 1)[0]
-        projection = fit_minutes_projection(logs[logs["season"] == latest], preseason)
         print(f"{len(rookies)} preseason players with no regular-season history (rookies)")
-        print(f"minutes projection: {projection.describe()}")
 
     with SleeperClient() as client:
         sleeper_players = client.get_players()
@@ -357,40 +297,11 @@ def main() -> int:
     }
     override_by_id = overrides_by_nba_id(overrides, name_to_id)
 
-    priors = build_minutes_priors(logs)
-    mean_minutes = logs.groupby("nba_player_id")["minutes"].mean()
-    games_played = logs.groupby("nba_player_id").size()
-    preseason_minutes_by_id = (
-        preseason_minutes(preseason).set_index("nba_player_id")["minutes"].to_dict()
-        if len(preseason)
-        else {}
-    )
-
-    def distribution_for(nba_id: int) -> EmpiricalScoreDistribution:
-        """Recency-weighted, shrunk toward the prior for his minutes band, then overridden.
-
-        Without the shrinkage a volatile 14-minute rookie outranks established starters:
-        Lock-In rewards variance, and a thin sample is almost all variance. The prior is what
-        makes a small sample behave like a small sample.
-
-        For a thin history the prior's band comes from his **preseason-projected** minutes
-        when he has any. Otherwise the band is picked by the very sample it is meant to
-        temper: late-season call-ups on tanking teams (Kennedy Chandler, 11 games at 32
-        minutes for Utah in March-April 2026) got a 30-36 minute prior and ranked 59th.
-        """
-        minutes = float(mean_minutes.get(nba_id, 0.0))
-        if (
-            projection is not None
-            and games_played.get(nba_id, 0) < MIN_GAMES_FOR_RELIABLE_HISTORY
-            and nba_id in preseason_minutes_by_id
-        ):
-            minutes = projection.project(preseason_minutes_by_id[nba_id])
-        prior = priors.get(band_for(minutes))
-        distribution = build_distribution(logs, nba_id, prior=prior)
-        override = override_by_id.get(nba_id)
-        if override is not None:
-            distribution = apply_override(distribution, override.value_multiplier, override.p_play)
-        return distribution
+    model = PlayerModel(logs, preseason, previous_seasons(season, 1)[0], override_by_id)
+    projection = model.projection
+    mean_minutes = model.mean_minutes
+    if projection is not None:
+        print(f"minutes projection: {projection.describe()}")
 
     gaps: list[str] = []
     for nba_id, name, team in mapping.unmapped:
@@ -398,19 +309,8 @@ def main() -> int:
     for nba_id, name, _ in mapping.ambiguous:
         gaps.append(f"ambiguous Sleeper match: {name} (nba id {nba_id})")
 
-    seasons_table = None
-    discount = 1.0
     if len(rookies):
-        discount = rookie_discount(logs, rookie_seasons(logs))
-        seasons_table = player_seasons(logs)
-        print(f"rookie discount: {discount:.3f} of a veteran at the same minutes")
-
-    def rookie_distribution(minutes: float, nba_id: int) -> EmpiricalScoreDistribution:
-        distribution = rookie_cohort_distribution(logs, seasons_table, minutes, discount)
-        override = override_by_id.get(nba_id)
-        if override is not None:
-            distribution = apply_override(distribution, override.value_multiplier, override.p_play)
-        return distribution
+        print(f"rookie discount: {model.rookie_discount:.3f} of a veteran at the same minutes")
 
     # (nba_id, name, fallback team, flags, preseason minutes or None for a veteran)
     pool = [
@@ -471,16 +371,16 @@ def main() -> int:
             continue
 
         if pre_minutes is None:
-            distribution = distribution_for(nba_id)
+            distribution = model.veteran(nba_id)
         else:
             projected = projection.project(pre_minutes)
-            distribution = rookie_distribution(projected, nba_id)
+            distribution = model.rookie_at(nba_id, projected)
             schedule = [int(games) for games in grid.loc[team]]
             low = season_value(
-                rookie_distribution(projected - projection.residual_sd, nba_id), schedule
+                model.rookie_at(nba_id, projected - projection.residual_sd), schedule
             )
             high = season_value(
-                rookie_distribution(projected + projection.residual_sd, nba_id), schedule
+                model.rookie_at(nba_id, projected + projection.residual_sd), schedule
             )
             rookie_ranges[nba_id] = (projected, low, high)
         distributions[nba_id] = distribution
