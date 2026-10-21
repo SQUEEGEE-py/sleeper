@@ -1,0 +1,26 @@
+# Rule 6: probe every endpoint the cloud nightly job will use, from GitHub's own IPs, before
+# building on them. Runs on push when the probe changes, and by hand from the Actions tab.
+name: probe endpoints
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/probe_endpoints.yml
+      - engine/jobs/probe_endpoints.py
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Probe (standard library only, no install)
+        run: python -m engine.jobs.probe_endpoints
