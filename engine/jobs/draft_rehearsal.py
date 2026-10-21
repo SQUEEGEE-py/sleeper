@@ -33,6 +33,7 @@ from engine.jobs.draft_live import (
     render_terminal,
     write_atomic,
 )
+from engine.jobs.runtime import utf8_output
 from engine.model.draft_sim import (
     DEFAULT_SIGMA,
     UNRANKED_ADP,
@@ -162,6 +163,7 @@ def calibrate(sigmas: list[float], sims: int) -> None:
 
 
 def main() -> int:
+    utf8_output()
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--slot", type=int, default=None, help="default: every slot once")
     parser.add_argument("--drafts", type=int, default=1, help="drafts per slot")

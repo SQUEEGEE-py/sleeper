@@ -47,6 +47,7 @@ import pandas as pd
 from engine.ingest.nba_stats import DATA_DIR, previous_seasons, regular_season_games
 from engine.ingest.sleeper import Roster, SleeperClient
 from engine.jobs.build_board import load_logs
+from engine.jobs.runtime import utf8_output
 from engine.model.lineup import assign_lineup, slot_position, starting_slots
 from engine.model.distributions import age_on, game_p_play
 from engine.model.lockin import ScoreDistribution, lock_threshold, weekly_value
@@ -357,6 +358,7 @@ def my_roster(client: SleeperClient, league_id: str, username: str) -> Roster:
 
 
 def main() -> int:
+    utf8_output()
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--week", type=int, default=None)
     parser.add_argument("--user", default=DEFAULT_USERNAME)

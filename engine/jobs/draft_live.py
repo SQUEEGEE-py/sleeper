@@ -40,6 +40,7 @@ from engine.model.draft_sim import (
     advise,
     draft_clock,
 )
+from engine.jobs.runtime import run_loop, utf8_output
 from engine.model.lineup import assign_lineup, slot_position, starting_slots
 
 CONFIG_PATH = Path("config/league.json")
@@ -418,7 +419,80 @@ def manager_names_by_slot(client: SleeperClient, draft: Draft) -> dict[int, str]
     return {slot: users.get(user_id, f"slot {slot}") for user_id, slot in draft.draft_order.items()}
 
 
+@dataclass
+class LivePoller:
+    """One pass of the advisor: fetch the draft, rebuild the view if anything changed, write
+    the page. ``main`` runs ``poll`` through ``runtime.run_loop``, so an exception anywhere in a
+    pass -- not only in the fetch -- is logged and the next pass still runs."""
+
+    client: SleeperClient
+    config: dict
+    pool: pd.DataFrame
+    adp: dict[str, float]
+    user_id: str
+    slots: list[str]
+    draft_id: str
+    page: Path
+    interval: float
+    slot_override: int | None = None
+    n_sims: int = DEFAULT_SIMS
+    status: FetchStatus = field(default_factory=FetchStatus)
+    draft: Draft | None = None
+    picks: list[DraftPick] = field(default_factory=list)
+    names: dict[int, str] = field(default_factory=dict)
+    view: View | None = None
+    signature: tuple | None = None
+
+    def poll(self) -> None:
+        status = self.status
+        try:
+            self.draft = self.client.get_draft_live(self.draft_id)
+            self.picks = self.client.get_draft_picks_live(self.draft_id)
+            status.last_ok, status.last_error, status.failures = time.time(), None, 0
+        except Exception as error:
+            status.last_error = f"{type(error).__name__}: {error}"[:200]
+            status.failures += 1
+
+        draft = self.draft
+        if draft is not None:
+            settings = draft.model_extra.get("settings") or {}
+            teams = int(settings.get("teams") or self.config["teams"])
+            rounds = int(settings.get("rounds") or self.config["draft_settings_live"]["rounds"])
+            if not self.names:
+                self.names = manager_names_by_slot(self.client, draft)
+            signature = (len(self.picks), json.dumps(draft.draft_order, sort_keys=True), draft.status)
+            if signature != self.signature:
+                self.view = build_view(self.pool, self.adp, draft, self.picks, self.user_id,
+                                       self.slots, teams, rounds, self.names, self.slot_override,
+                                       n_sims=self.n_sims)
+                self.signature = signature
+                print("\033[2J\033[H" + render_terminal(self.view, status), flush=True)
+            elif status.last_error:
+                print(f"!! fetch failing ({status.failures}x): {status.last_error}", flush=True)
+
+        if self.view is not None:
+            write_atomic(self.page, render_html(self.view, status, self.interval, time.time()))
+        elif status.last_error:
+            print(f"!! cannot reach Sleeper yet: {status.last_error}", flush=True)
+
+    def done(self) -> bool:
+        return self.draft is not None and self.draft.status == "complete"
+
+    def failed(self, error: Exception, log_path: Path) -> None:
+        """A pass raised. Say so in the terminal and on the page, keep the last good view."""
+        self.status.last_error = f"advisor error {type(error).__name__}: {error}"[:200]
+        self.status.failures += 1
+        print(f"!! poll failed ({self.status.failures}x): {self.status.last_error} "
+              f"-- traceback in {log_path}", flush=True)
+        if self.view is not None:
+            try:
+                write_atomic(self.page, render_html(self.view, self.status, self.interval, time.time()))
+            except Exception:  # the page write may be what failed; the next pass retries it
+                pass
+
+
 def main() -> int:
+    utf8_output()
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     config = load_config()
     parser.add_argument("--draft-id", default=config["draft_settings_live"]["draft_id"])
@@ -433,7 +507,6 @@ def main() -> int:
     slots = starting_slots(config["roster_positions"])
     pool = load_pool()
     page = args.out / "live.html"
-    status = FetchStatus()
 
     with SleeperClient() as client:
         user_id = client.get_user(args.user).user_id
@@ -446,43 +519,10 @@ def main() -> int:
         print(f"pool {len(pool)} players, ADP for {sum(sid in adp for sid in pool.index)} of them; "
               f"user {args.user} = {user_id}; page {page.resolve()}")
 
-        draft: Draft | None = None
-        picks: list[DraftPick] = []
-        names: dict[int, str] = {}
-        view: View | None = None
-        signature = None
-        while True:
-            try:
-                draft = client.get_draft_live(args.draft_id)
-                picks = client.get_draft_picks_live(args.draft_id)
-                status.last_ok, status.last_error, status.failures = time.time(), None, 0
-            except Exception as error:
-                status.last_error = f"{type(error).__name__}: {error}"[:200]
-                status.failures += 1
-
-            if draft is not None:
-                settings = draft.model_extra.get("settings") or {}
-                teams = int(settings.get("teams") or config["teams"])
-                rounds = int(settings.get("rounds") or config["draft_settings_live"]["rounds"])
-                if not names:
-                    names = manager_names_by_slot(client, draft)
-                new_signature = (len(picks), json.dumps(draft.draft_order, sort_keys=True), draft.status)
-                if new_signature != signature:
-                    view = build_view(pool, adp, draft, picks, user_id, slots, teams, rounds,
-                                      names, args.slot, n_sims=args.sims)
-                    signature = new_signature
-                    print("\033[2J\033[H" + render_terminal(view, status), flush=True)
-                elif status.last_error:
-                    print(f"!! fetch failing ({status.failures}x): {status.last_error}", flush=True)
-
-            if view is not None:
-                write_atomic(page, render_html(view, status, args.interval, time.time()))
-            elif status.last_error:
-                print(f"!! cannot reach Sleeper yet: {status.last_error}", flush=True)
-
-            if args.once or (draft is not None and draft.status == "complete"):
-                break
-            time.sleep(args.interval)
+        poller = LivePoller(client, config, pool, adp, user_id, slots, args.draft_id, page,
+                            args.interval, slot_override=args.slot, n_sims=args.sims)
+        run_loop("draft_live", poller.poll, interval=args.interval,
+                 should_stop=lambda: args.once or poller.done(), on_error=poller.failed)
     return 0
 
 

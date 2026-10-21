@@ -118,3 +118,54 @@ def test_view_never_recommends_a_taken_player(picks_made: int) -> None:
     view = view_for(picks, order={ME: 4})
     taken = {p.player_id for p in picks}
     assert not taken & {rec.sleeper_id for rec in view.recommendations}
+
+
+class FakeClient:
+    """Serves one more pick per poll; the last poll reports the draft complete."""
+
+    def __init__(self, picks: list[DraftPick]) -> None:
+        self.picks, self.polls = picks, 0
+
+    def get_draft_live(self, draft_id: str) -> Draft:
+        self.polls += 1
+        status = "complete" if self.polls > len(self.picks) else "drafting"
+        return Draft.model_validate({"draft_id": draft_id, "status": status, "draft_order": {ME: 1}})
+
+    def get_draft_picks_live(self, draft_id: str) -> list[DraftPick]:
+        return self.picks[: self.polls - 1]
+
+
+def test_an_exception_inside_build_view_does_not_stop_the_advisor(tmp_path, monkeypatch) -> None:
+    # The 2026-10-18 incident: only the fetch was guarded, so anything raised after it killed
+    # the advisor mid-draft. Pass 2 raises inside build_view; passes 3-4 must still run.
+    import engine.jobs.draft_live as live
+    from engine.jobs.runtime import run_loop
+
+    real_build, calls = live.build_view, []
+
+    def flaky_build(*args, **kwargs):
+        calls.append(1)
+        if len(calls) == 2:
+            raise ZeroDivisionError("boom in build_view")
+        return real_build(*args, **kwargs)
+
+    monkeypatch.setattr(live, "build_view", flaky_build)
+    client = FakeClient([pick(1, "s1", 1, by=ME), pick(2, "s2", 2), pick(3, "s3", 3)])
+    page = tmp_path / "live.html"
+    poller = live.LivePoller(client, {"teams": 4, "draft_settings_live": {"rounds": 4}}, pool(),
+                             ADP, ME, SLOTS, "d", page, interval=0, n_sims=50)
+    pages: list[str] = []
+
+    def failed(error, path):
+        poller.failed(error, path)
+        pages.append(page.read_text(encoding="utf-8"))
+
+    run_loop("draft_live", poller.poll, interval=0, should_stop=poller.done, on_error=failed,
+             sleep=lambda _: None, log_dir=tmp_path / "logs")
+
+    assert client.polls == 4 and poller.done()
+    assert len(pages) == 1 and "boom in build_view" in pages[0]  # shown on the page, not lost
+    assert "ZeroDivisionError" in (tmp_path / "logs" / "draft_live.log").read_text(encoding="utf-8")
+    final = page.read_text(encoding="utf-8")
+    assert "boom in build_view" not in final  # a good pass clears the banner
+    assert all(sid not in [r.sleeper_id for r in poller.view.recommendations] for sid in ("s1", "s2", "s3"))

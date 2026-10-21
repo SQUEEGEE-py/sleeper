@@ -14,6 +14,7 @@ from pathlib import Path
 from dotenv import load_dotenv
 
 from engine.ingest.sleeper import SleeperClient
+from engine.jobs.runtime import utf8_output
 
 CONFIG_PATH = Path("config/league.json")
 
@@ -113,6 +114,7 @@ def diff_settings(config: dict, live_settings: dict) -> list[str]:
 
 
 def main() -> int:
+    utf8_output()
     load_dotenv()
     config = load_config()
     league_id = config.get("league_id")

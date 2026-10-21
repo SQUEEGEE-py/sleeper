@@ -31,12 +31,14 @@ from engine.ingest.nba_stats import (
     schedule_completeness,
     verify_weeks_match_fantasy_weeks,
 )
+from engine.jobs.runtime import utf8_output
 
 CONFIG_PATH = Path("config/league.json")
 HISTORY_SEASONS = 3
 
 
 def main() -> int:
+    utf8_output()
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "--force", action="store_true", help="refetch even if parquet already exists"

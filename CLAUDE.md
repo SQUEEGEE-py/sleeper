@@ -35,7 +35,7 @@ ends with the user taking the action in the Sleeper app.
    accurate when written but these are mostly undocumented or fast-moving APIs. Probe first,
    then write the client.
 
-## Current state (2026-10-19)
+## Current state (2026-10-21)
 
 **The draft is done** (Sunday 2026-10-18, see "The draft" below). **Phase 3 (in-season) has
 started**, following a seven-step plan the user set on 2026-10-19 (see "Phase 3 plan and
@@ -43,7 +43,11 @@ status" at the end of this section). **Step 1 is done**: a week-1 lock cheat she
 (`lock_sheet.py`). **Step 2 is wired in (age-band ratio only, the user's choice)**: a
 back-to-back second night lowers that game's `p_play` by the measured ratio for the player's
 age on the game date, which lowers the lock thresholds before it. The per-player blend is a
-later, separate step. The season opens Tuesday 2026-10-20.
+later, separate step. **Step 3 is done** (2026-10-21): every job prints UTF-8 and the live
+advisor's whole poll is guarded (`engine/jobs/runtime.py`). The season opened Tuesday
+2026-10-20. On 2026-10-21 the user also corrected the league rules (2 IR slots,
+reverse-standings priority waivers, no FAAB) and chose a **cloud-first nightly job with
+Discord alerts** for step 4.
 
 **Working agreement for phase 3:** do the steps in order and **stop after each one** for the
 user to review. Commits are `phase3: <what>`. The user asks before anything is committed or
@@ -52,7 +56,7 @@ pushed.
 Everything runnable today, in the order you would use it:
 
 ```
-uv run pytest                                             # 326 tests, none need the network
+uv run pytest                                             # 331 tests, none need the network
 uv run python -m engine.jobs.verify_league                # config vs live Sleeper; exits 1 on drift
 uv run python -m engine.jobs.ingest_history [--force]     # LOCAL ONLY: logs + schedule -> parquet
 uv run python -m engine.jobs.build_board [--top 150]      # -> data/board/{board.csv,board.html,pool.csv}
@@ -64,8 +68,8 @@ uv run python -m engine.jobs.lock_sheet [--week N]                      # -> dat
 ```
 
 Per-file test counts: scoring 89, distributions 38, lockin 37, nba_stats 26, lineup 25,
-player_ids 22, draft_sim 29, lock_sheet 17, rookies 14, valuation 11, draft_live 10,
-verify_league 8.
+player_ids 22, draft_sim 29, lock_sheet 17, rookies 14, valuation 11, draft_live 11,
+verify_league 8, runtime 4.
 
 `data/` is gitignored and regenerable. **On a fresh checkout run `ingest_history` then
 `build_board` before anything else** -- the 2026-10-16 session started with no `data/` at all.
@@ -512,14 +516,16 @@ long injuries, and the model has no age decline term. gilbobo (Luka, Booker, AD,
 Johnson, Chet; median ADP 33) is the threat by both measures. tristantro drafted Kendrick
 Perkins, a retired player.
 
-**Open incident: the advisor stopped at 18:31** during the real draft (page last written
+**Incident: the advisor stopped at 18:31** during the real draft (page last written
 18:31:08, pick 38 on the clock). Sleeper was reachable from the same machine, and
 `build_view` ran cleanly on the exact live state (0.13 s), so it was not the data. The user
-restarted it and it ran to the end. No traceback has been captured; until one is, the cause is
-unknown -- the process died or hung. Candidates: an exception outside the fetch `try` (in
-`manager_names_by_slot`, `build_view` or `render_html`) would kill the loop. **Fix before the
-next live use: wrap the per-poll body, not only the fetch, so one bad poll logs and
-continues.**
+restarted it and it ran to the end. No traceback was captured, so the cause is still
+unknown. Only the fetch was inside a `try`; the most plausible Windows candidates are
+`os.replace` in `write_atomic` refusing while the browser reads the page, and a cp1252
+`print` failing on a name like "Vučević" if output was a pipe. **Fixed 2026-10-21 (step 3):**
+the whole poll now runs through `runtime.run_loop` -- a failed pass logs its traceback to
+`data/logs/draft_live.log`, shows the error on the page, and the next pass runs. If it ever
+happens again, that log has the cause.
 
 ### Measured after the mock, not yet acted on: rookies
 
@@ -629,17 +635,31 @@ LeBron Sat 38.7 -> 34.0, Kyrie Fri 34.8 -> 30.6); starting nine week value 482.9
 
 1. ~~Week-1 lock cheat sheet~~ -- **done** (above).
 2. ~~Back-to-back `p_play`~~ -- **done**, band ratio only (above).
-3. **Harden the poll loop** (the 18:31 incident): in `draft_live.py` wrap the *whole*
-   per-poll body, log tracebacks to `data/logs/`, keep looping; a test that raises inside
-   `build_view` and asserts the loop survives. The nightly job copies the pattern. Also: job
-   output crashes when redirected to a file (Windows cp1252 cannot encode "Vučević";
-   `lock_sheet > out.txt` dies) -- make stdout UTF-8 so logs and scheduled runs work.
+3. ~~Harden the poll loop~~ -- **done 2026-10-21.** `engine/jobs/runtime.py` holds
+   `run_loop` (guards the whole pass, logs tracebacks to `data/logs/<job>.log`, hands the
+   error to the job, keeps going; only `KeyboardInterrupt` stops it) and `utf8_output`
+   (every job's `main()` calls it first, so `lock_sheet > out.txt` works). `draft_live`'s
+   pass is now `LivePoller.poll`; `LivePoller.failed` puts the error on the page and keeps the
+   last good view. Tested by raising inside `build_view` mid-draft; three mutations (loop
+   re-raises, error not on the page, no UTF-8) each fail the suite. **The nightly job must
+   use `run_loop`/`utf8_output` too.**
 4. **M6 nightly advisor** (TASKS M6): probe the matchups endpoint for lock status first (rule
    6) -- if absent, infer it and add manual confirmation; `matchup.py` weekly win-probability
    sim vs this week's opponent; `nightly.py` LOCK/ROLL per started player with a one-line
    why, ordered by the earliest deadline, matchup-aware (roll more when behind, lock more
-   when ahead); ntfy push (`NTFY_TOPIC` in `.env`); runs locally (stats.nba.com blocks cloud
-   IPs). Needs tip-off times in the schedule.
+   when ahead). **Cloud-first, decided 2026-10-21:** runs on GitHub Actions cron, alerts go
+   to a **Discord webhook** (`DISCORD_WEBHOOK_URL` in `.env` locally, a GitHub secret in
+   Actions; never ntfy). In-season data avoids stats.nba.com (blocks cloud IPs):
+   - box scores: Sleeper `api.sleeper.com/stats/nba/player/{id}?season_type=regular&season=2026&grouping=week`
+     (per game, dated; probed 2026-10-21 -- Brown's 10/20 line rescored to Sleeper's 43.5)
+     and the bulk `api.sleeper.com/stats/nba/2026?season_type=regular&week=N` (weekly totals);
+   - schedule + game status: `api.sleeper.com/schedule/nba/regular/2026` (no tip times);
+   - tip-off times: ESPN `site.api.espn.com/apis/site/v2/sports/basketball/nba/scoreboard?dates=YYYYMMDD`;
+   - 2023-26 history: static, uploaded once from the laptop (Supabase or similar); only the
+     occasional history refresh stays local.
+   Before relying on them: a one-off Actions workflow that probes every endpoint from GitHub's
+   IPs (rule 6), and a local week-long diff of Sleeper box scores vs stats.nba.com. Actions
+   cron can start 5-30 min late, so alerts fire well before tip-off, never at the deadline.
 5. **Resolve the scoring ambiguities** after the first week-1 games: rescore real box scores
    through `scoring.py` under every flag combination, diff against Sleeper matchup
    `players_points`, set `bonuses_stack` / `td_includes_dd` in `config/league.json` with the
@@ -668,7 +688,8 @@ divisions).
 - **Web:** React + Vite + TypeScript + Tailwind, deployed on Vercel at `fantasy.ferf.gg`
   (DNS in Route 53, same pattern as the househunt tracker).
 - **Scheduling:** GitHub Actions cron for anything that talks to Sleeper/Kalshi/Polymarket.
-- **Notifications:** ntfy.sh topic (free, no account) for nightly lock alerts.
+- **Notifications:** Discord webhook (`DISCORD_WEBHOOK_URL`, a secret) for lock, waiver and IR
+  alerts. Chosen over ntfy 2026-10-21.
 - **LLM:** Anthropic API, optional. Must degrade to a "copy this briefing into a chat" text
   blob if no key is set. See `docs/SPEC.md` §8.
 

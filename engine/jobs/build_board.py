@@ -28,6 +28,7 @@ from engine.ingest.player_ids import (
     overrides_by_nba_id,
 )
 from engine.ingest.sleeper import SleeperClient
+from engine.jobs.runtime import utf8_output
 from engine.model.distributions import EmpiricalScoreDistribution, score_game_logs
 from engine.model.lineup import starting_slots
 from engine.model.lockin import season_value, weekly_value
@@ -239,6 +240,7 @@ rs.forEach(function(r){{tb.appendChild(r)}})}})}});
 
 
 def main() -> int:
+    utf8_output()
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--top", type=int, default=DEFAULT_TOP)
     parser.add_argument("--data-dir", type=Path, default=DATA_DIR)

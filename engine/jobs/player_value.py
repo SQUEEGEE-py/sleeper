@@ -18,6 +18,7 @@ from pathlib import Path
 import pandas as pd
 
 from engine.ingest.nba_stats import DATA_DIR, previous_seasons
+from engine.jobs.runtime import utf8_output
 from engine.model.distributions import (
     MIN_GAMES_FOR_RELIABLE_HISTORY,
     EmpiricalScoreDistribution,
@@ -150,6 +151,7 @@ def describe(
 
 
 def main() -> int:
+    utf8_output()
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("players", nargs="+", help="player name(s), accents optional")
     parser.add_argument("--compare", action="store_true", help="one summary line per player")
