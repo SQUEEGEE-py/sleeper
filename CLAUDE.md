@@ -52,7 +52,7 @@ pushed.
 Everything runnable today, in the order you would use it:
 
 ```
-uv run pytest                                             # 318 tests, none need the network
+uv run pytest                                             # 326 tests, none need the network
 uv run python -m engine.jobs.verify_league                # config vs live Sleeper; exits 1 on drift
 uv run python -m engine.jobs.ingest_history [--force]     # LOCAL ONLY: logs + schedule -> parquet
 uv run python -m engine.jobs.build_board [--top 150]      # -> data/board/{board.csv,board.html,pool.csv}
@@ -64,7 +64,8 @@ uv run python -m engine.jobs.lock_sheet [--week N]                      # -> dat
 ```
 
 Per-file test counts: scoring 89, distributions 38, lockin 37, nba_stats 26, lineup 25,
-player_ids 22, draft_sim 29, lock_sheet 17, rookies 14, valuation 11, draft_live 10.
+player_ids 22, draft_sim 29, lock_sheet 17, rookies 14, valuation 11, draft_live 10,
+verify_league 8.
 
 `data/` is gitignored and regenerable. **On a fresh checkout run `ingest_history` then
 `build_board` before anything else** -- the 2026-10-16 session started with no `data/` at all.
@@ -104,8 +105,9 @@ resolutions are recorded in `config/league.json`'s `_*_comment` fields:
   extras. `config/league.json` now stores Sleeper's spelling verbatim so `verify_league`
   compares with no translation; `scoring.py` holds the one verified
   `STAT_FIELD_TO_SCORING_KEY` table and the rest of the engine speaks readable field names.
-- **The league has no IR slots.** The transcription assumed 2. Confirmed twice (league
-  `roster_positions` and the draft object's `slots_*`). See "What the live league changed".
+- ~~The league has no IR slots~~ -- **wrong, corrected 2026-10-21: there are 2.** Sleeper
+  keeps IR in `settings.reserve_slots`, never in `roster_positions` or the draft's `slots_*`,
+  which is all this check looked at. See "What the live league changed".
 
 ### The league itself
 
@@ -132,14 +134,26 @@ advisor's survival model (see M5) and shows per-coach tendencies (cyapp1 reaches
 
 ### What the live league changed vs docs/SPEC.md
 
-The spec was written from screenshots and is wrong in three places, plus one thing it never
-mentioned. `config/league.json` has
-been corrected; **the spec has not been rewritten yet.**
+The spec was written from screenshots. `config/league.json` has been corrected; **the spec
+has not been rewritten yet.** Two of the 2026-09-23 "corrections" were themselves wrong and
+were fixed on 2026-10-21 -- the lesson for both: **league rules live in `settings`, not only
+in `roster_positions`, and a field's presence is not evidence the feature is on.**
+`verify_league` now checks `settings` too (IR slots and eligible statuses, waiver type, clear
+days, game-start waivers, playoffs, trade deadline, divisions, teams; `test_verify_league.py`)
+and fetches the league live instead of from the forever-cache.
 
-- **No IR slots.** SPEC §7.2's IR-stash strategy (flagging injured stars who cost no active
-  roster spot) does not apply. Delete it rather than implementing it.
-- **Waivers are FAAB**, `waiver_budget: 100`, not rolling priority. SPEC §7.3 ranks waiver
-  targets but says nothing about bid sizing, which is now a real modelling question.
+- **2 IR slots -- the spec was right.** `settings.reserve_slots` = 2; one roster already uses
+  it. Eligible: **OUT, SUS, DNR** only (`reserve_allow_*`), not DTD or doubtful. An IR player
+  costs no active spot, so SPEC §7.2's IR stash applies -- and matters most to the user, whose
+  roster is the oldest in the league.
+- **No FAAB -- priority waivers.** Confirmed by the user in the app. `waiver_budget: 100` is a
+  default present in every league; week 1's waiver claim has `{seq: 0}` and no `waiver_bid`,
+  every `waiver_budget_used` is 0, and each roster has a `waiver_position` (the user was 7th
+  of 8 on 2026-10-21). **Order is reverse standings** (user-confirmed), so `waiver_type` 1 =
+  reverse standings: a winning claim does not send you to the back, and leading the league
+  means claiming last. Dropped players clear in 1 day; a free agent goes back on waivers
+  once his game tips (`waiver_after_game_start`), so adds must happen before his game. There
+  is no bid-sizing problem; the question is when a claim is worth spending priority on.
 - **Two divisions**, which the spec never mentions. Check how they affect the top-4 playoff
   cut that the draft simulator's `threat[team]` is built around.
 - **No keepers, despite `max_keepers: 1`.** That field is an inert Sleeper default here;
@@ -635,13 +649,17 @@ LeBron Sat 38.7 -> 34.0, Kyrie Fri 34.8 -> 30.6); starting nine week value 482.9
    values for the user's roster; a team-changer flag (Brown and LeBron to PHI, Kawhi to TOR,
    ...) comparing current-season minutes/usage to last season once 5+ games exist. No
    hand-entered overrides.
-7. **Roster management** (after week 1): FAAB bid sizing ($100, no IR, recommend a
-   reserve); trade finder seeded with the forward surplus (Brown, Durant, Kawhi, LeBron,
+7. **Roster management** (after week 1): free-agent ranker (this-week and rest-of-season
+   value vs the user's lowest-value player, through `player_model`); with reverse-standings
+   priority (no FAAB) a claim costs nothing later, so the question is only whether a
+   higher-priority team will take the player first, else wait a day for free agency; IR alerts when a
+   rostered player turns OUT/SUS/DNR, so he can be stashed and a replacement added; trade finder seeded with the forward surplus (Brown, Durant, Kawhi, LeBron,
    DeRozan, Bey) vs other rosters' needs, a week-19 deadline countdown and a "sell an old
    player before the week-22 playoffs" flag; fold the measured rookie blend into `rookies.py`.
 
 At the end: update this file's "Current state" and plan, the README, and fix `docs/SPEC.md`
-(delete §7.2 IR, FAAB, two divisions).
+(§7.2 IR stays but with the OUT/SUS/DNR eligibility; §7.3 priority waivers, no FAAB; two
+divisions).
 
 ## Stack
 

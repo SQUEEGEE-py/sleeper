@@ -43,6 +43,9 @@ class League(BaseModel):
     total_rosters: int
     roster_positions: list[str]
     scoring_settings: dict[str, float]
+    # League rules outside scoring and the active slots: reserve_slots (IR), waiver_*,
+    # playoff_*, trade_deadline, divisions. IR is here, never in roster_positions.
+    settings: dict[str, Any] = {}
 
 
 class Roster(BaseModel):
@@ -176,6 +179,11 @@ class SleeperClient:
     def get_league(self, league_id: str) -> League:
         data = self._get(f"/league/{league_id}", f"league_{league_id}")
         return League.model_validate(data)
+
+    def get_league_live(self, league_id: str) -> League:
+        """The league, never from cache. ``get_league`` caches forever, so verify_league would
+        otherwise keep checking the config against whatever was fetched first."""
+        return League.model_validate(self._get_fresh(f"/league/{league_id}", f"league_{league_id}"))
 
     def get_rosters(self, league_id: str) -> list[Roster]:
         data = self._get(f"/league/{league_id}/rosters", f"rosters_{league_id}")

@@ -1,5 +1,5 @@
 {
-  "_comment": "Source of truth for league rules. Verify against Sleeper's GET /v1/league/<league_id> scoring_settings + roster_positions on first run and fail loudly on mismatch.",
+  "_comment": "Source of truth for league rules. verify_league checks scoring_settings, roster_positions and the league settings it maps (teams, IR, waivers, playoffs, trade deadline, divisions) against Sleeper's GET /v1/league/<league_id> and fails loudly on mismatch.",
   "platform": "sleeper",
   "league_id": "1405604996254339072",
   "sport": "nba",
@@ -11,16 +11,20 @@
   "draft_date": "TBD",
   "draft_slot": null,
 
-  "_roster_comment": "Verified against live roster_positions on 2026-09-23. There are NO IR slots -- the original transcription assumed 2. Confirmed twice: the league's roster_positions ends at the 4th BN, and the draft object's settings carry no slots_ir. SPEC §7.2's IR strategy (stashing injured stars at no active-roster cost) therefore does not apply to this league.",
+  "_roster_comment": "Verified against live roster_positions on 2026-09-23. roster_positions lists the 13 active slots only -- Sleeper never puts IR there, so its absence from that list (and from the draft object's slots_*) does NOT mean the league has no IR. See ir below.",
   "roster_positions": ["PG", "SG", "G", "SF", "PF", "F", "C", "C", "UTIL", "BN", "BN", "BN", "BN"],
   "starters": 9,
   "bench": 4,
-  "ir": 0,
   "roster_size_active": 13,
+
+  "ir": {
+    "slots": 2,
+    "eligible_statuses": ["OUT", "SUS", "DNR"],
+    "_comment": "Corrected 2026-10-21. There ARE 2 IR slots: live settings.reserve_slots = 2, and one roster already has a player in its reserve list. The 2026-09-23 'no IR' finding read roster_positions, which never contains IR on Sleeper. Eligible statuses come from settings.reserve_allow_*: out, sus and dnr are 1; dtd, doubtful, na and cov are 0 -- a day-to-day player cannot be stashed. An IR player costs no active roster spot, so SPEC §7.2's IR strategy applies after all. verify_league checks all of this against the live league."
+  },
 
   "playoffs": { "teams": 4, "start_week": 22 },
   "trade_deadline_week": 19,
-  "waiver_days": 1,
   "draft_pick_trading": false,
 
   "_from_live_settings": "Read off the live league on 2026-09-23. These were absent from the original transcription and none of them are yet reflected in docs/SPEC.md. Values are Sleeper's, not inferred.",
@@ -33,10 +37,12 @@
     "_previous_league_note": "This league continues last season's. Nothing carries over, but that league's completed draft is real data for the M5 dress rehearsal (docs/TASKS.md M5, SPEC §9.6) -- a replayable 8-team snake draft with the same managers."
   },
   "waivers": {
-    "type": "faab",
-    "budget": 100,
+    "bidding": false,
+    "order": "reverse_standings",
+    "sleeper_waiver_type": 1,
     "clear_days": 1,
-    "_note": "waiver_type=1 with waiver_budget=100 is FAAB bidding, not rolling priority. SPEC §7.3 ranks waiver targets but says nothing about what to bid."
+    "after_game_start": true,
+    "_comment": "Corrected 2026-10-21: NO FAAB, confirmed by the user in the Sleeper app. Claims are decided by waiver priority (each roster's settings.waiver_position, 1-8). Evidence in the data: week 1's completed waiver claim carries settings {seq: 0} and no waiver_bid, and every roster's waiver_budget_used is 0. settings.waiver_budget = 100 is a platform default present whether or not bidding is on -- do not read FAAB from it, which is the mistake the 2026-09-23 note made. order: reverse standings, confirmed by the user in the app 2026-10-21 -- so waiver_type 1 means reverse standings (verify_league compares the code verbatim). Priority resets with the standings rather than moving a team to the back after a claim, so a successful claim costs nothing for later weeks; the worse your record, the better your priority. clear_days: a dropped player sits on waivers 1 day, then is a free agent. after_game_start: a free agent whose game has tipped off goes back on waivers, so pickups have to happen before his game."
   },
   "draft_settings_live": {
     "draft_id": "1405604996266901504",

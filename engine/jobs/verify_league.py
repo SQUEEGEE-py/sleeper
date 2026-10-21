@@ -56,6 +56,62 @@ def diff_roster_positions(config_positions: list[str], live_positions: list[str]
     ]
 
 
+# Readable config field -> Sleeper's settings key. Values are compared after int(), so a config
+# true matches Sleeper's 1. waiver_budget is deliberately absent: it reads 100 whether or not
+# the league bids, which is how FAAB was wrongly recorded in 2026-09.
+SETTINGS_KEYS: dict[tuple[str, ...], str] = {
+    ("teams",): "num_teams",
+    ("ir", "slots"): "reserve_slots",
+    ("waivers", "sleeper_waiver_type"): "waiver_type",
+    ("waivers", "clear_days"): "waiver_clear_days",
+    ("waivers", "after_game_start"): "waiver_after_game_start",
+    ("playoffs", "teams"): "playoff_teams",
+    ("playoffs", "start_week"): "playoff_week_start",
+    ("trade_deadline_week",): "trade_deadline",
+    ("divisions",): "divisions",
+}
+
+IR_STATUS_PREFIX = "reserve_allow_"
+
+
+def _lookup(config: dict, path: tuple[str, ...]) -> object:
+    value: object = config
+    for key in path:
+        value = value[key]  # type: ignore[index]
+    return value
+
+
+def diff_settings(config: dict, live_settings: dict) -> list[str]:
+    """Compare the league rules that live in Sleeper's ``settings`` rather than in scoring or
+    roster_positions: IR, waivers, playoffs, trade deadline, divisions.
+
+    IR eligibility is compared as a set of statuses: every ``reserve_allow_<status>`` set to 1
+    must be in ``config["ir"]["eligible_statuses"]`` and nothing else may be, so a status Sleeper
+    adds later shows up here instead of being ignored.
+    """
+    lines = []
+    for path, sleeper_key in SETTINGS_KEYS.items():
+        name = ".".join(path)
+        if sleeper_key not in live_settings:
+            lines.append(f"  {name}: Sleeper settings has no {sleeper_key!r} -- confirm the key name")
+            continue
+        expected, actual = int(_lookup(config, path)), int(live_settings[sleeper_key])
+        if expected != actual:
+            lines.append(f"  {name}: config={expected!r} live {sleeper_key}={actual!r}")
+
+    live_ir = {
+        key.removeprefix(IR_STATUS_PREFIX).upper()
+        for key, value in live_settings.items()
+        if key.startswith(IR_STATUS_PREFIX) and value
+    }
+    config_ir = set(config["ir"]["eligible_statuses"])
+    if live_ir != config_ir:
+        lines.append(
+            f"  ir.eligible_statuses: config={sorted(config_ir)!r} live={sorted(live_ir)!r}"
+        )
+    return lines
+
+
 def main() -> int:
     load_dotenv()
     config = load_config()
@@ -70,15 +126,17 @@ def main() -> int:
         return 1
 
     with SleeperClient() as client:
-        league = client.get_league(league_id)
+        league = client.get_league_live(league_id)
 
     mismatches: list[str] = []
     mismatches += diff_scoring(config["scoring"], league.scoring_settings)
     mismatches += diff_roster_positions(config["roster_positions"], league.roster_positions)
+    mismatches += diff_settings(config, league.settings)
 
     print(f"League: {league.name} ({league.season})")
     print(f"Teams: {league.total_rosters}")
     print(f"Roster slots: {league.roster_positions}")
+    print(f"IR slots: {league.settings.get('reserve_slots')}")
 
     if mismatches:
         print(f"\nMISMATCH between config/league.json and live Sleeper league {league_id}:")
@@ -86,7 +144,7 @@ def main() -> int:
             print(line)
         return 1
 
-    print("\nScoring settings and roster positions match config/league.json.")
+    print("\nScoring, roster positions, IR, waivers, playoffs and trade deadline match config/league.json.")
     return 0
 
 
