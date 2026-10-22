@@ -67,3 +67,11 @@ def test_phone_report_leads_with_odds_and_the_calls() -> None:
     assert "win 74% if locked / 73% if rolled" in text
     assert "Locked: Nikola Jokic 60" in text and "- a gap" in text
     assert "not** already locked" in text
+
+
+def test_rerun_banner_names_the_change_and_supersedes() -> None:
+    from engine.jobs.nightly import rerun_banner
+    banner = rerun_banner("phase3: age curve from a backtest\n\nlong body that is not shown")
+    assert "Re-run after a model change" in banner and "phase3: age curve from a backtest" in banner
+    assert "long body" not in banner and "supersedes" in banner
+    assert "model updated" in rerun_banner("   ")

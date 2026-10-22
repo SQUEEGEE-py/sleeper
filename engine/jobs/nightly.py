@@ -407,8 +407,19 @@ def run(args: argparse.Namespace) -> int:
             return 0
         shown = due_today if args.only_if_due_today else decisions
         message = render_discord(week, their_name, mine, mine_m, theirs_m, odds, shown, gaps, roles)
+        if args.reason:
+            message = rerun_banner(args.reason) + "\n" + message
         post_or_say(message)
     return 0
+
+
+def rerun_banner(reason: str) -> str:
+    """Heads a report posted because the model changed, not because the night ended: a call
+    that differs from the last post is then explained by the change, not by the player (the
+    Kawhi flip on 2026-10-22 came from the age adjustment, and arrived unexplained)."""
+    first_line = reason.strip().splitlines()[0][:200] if reason.strip() else "model updated"
+    return (f"🔄 **Re-run after a model change:** {first_line}\n"
+            "Calls below may differ from earlier posts -- this version supersedes them.")
 
 
 def post_or_say(message: str) -> None:
@@ -432,6 +443,8 @@ def main() -> int:
     parser.add_argument("--post", action="store_true", help="also post the report to Discord")
     parser.add_argument("--only-if-due-today", action="store_true",
                         help="with --post: post only decisions whose next game is today (the afternoon reminder)")
+    parser.add_argument("--reason", default="",
+                        help="with --post: why this run happened off-schedule (the commit that changed the model)")
     args = parser.parse_args()
     try:
         return run(args)

@@ -6,12 +6,26 @@
 #               report -- odds and every open LOCK/ROLL call;
 #   19:43 UTC = 3:43 pm ET (2:43 pm after DST ends): a reminder, posted only if a decision is
 #               due before tonight's games.
+# And on every push that can change a recommendation -- the model, the league rules, the
+# snapshot it reads, or the advisor itself -- a full report headed with the commit's subject,
+# so a call that flips is explained by the change that flipped it.
 name: nightly advisor
 
 on:
   schedule:
     - cron: "43 7 * * *"
     - cron: "43 19 * * *"
+  push:
+    branches: [main]
+    paths:
+      - engine/model/**
+      - engine/ingest/**
+      - engine/jobs/nightly.py
+      - engine/jobs/lock_sheet.py
+      - engine/jobs/build_board.py
+      - config/league.json
+      - config/player_overrides.csv
+      - snapshot/**
   workflow_dispatch:
     inputs:
       only_if_due_today:
@@ -42,10 +56,17 @@ jobs:
           DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
           SCHEDULE: ${{ github.event.schedule }}
           DUE_TODAY_INPUT: ${{ inputs.only_if_due_today }}
+          EVENT: ${{ github.event_name }}
+          # Passed as data, never interpolated into the script: a commit message can hold anything.
+          COMMIT_MESSAGE: ${{ github.event.head_commit.message }}
         run: |
           flag=""
           if [ "$SCHEDULE" = "43 19 * * *" ] || [ "$DUE_TODAY_INPUT" = "true" ]; then
             flag="--only-if-due-today"
           fi
+          reason=""
+          if [ "$EVENT" = "push" ]; then
+            reason="$COMMIT_MESSAGE"
+          fi
           uv run --python 3.11 python -m engine.jobs.nightly --post \
-            --data-dir snapshot --pool snapshot/pool.csv $flag
+            --data-dir snapshot --pool snapshot/pool.csv $flag --reason "$reason"

@@ -705,6 +705,12 @@ LeBron Sat 38.7 -> 34.0, Kyrie Fri 34.8 -> 30.6); starting nine week value 482.9
      current-season logs from Sleeper's per-game stats in the cloud would remove that chore.
    - **`.github/workflows/nightly.yml`**: 07:43 UTC full report, 19:43 UTC reminder only if a
      decision is due that day, plus manual runs. Both workflows on checkout v5 / setup-python v6.
+   - **Re-run on model change** (user request, 2026-10-22, after the age adjustment flipped
+     Kawhi from ROLL to LOCK with no explanation in Discord): any push touching
+     `engine/model/**`, `engine/ingest/**`, `nightly.py`, `lock_sheet.py`, `build_board.py`,
+     `config/league.json`, `config/player_overrides.csv` or `snapshot/**` reruns the advisor
+     and posts a full report headed "Re-run after a model change: <commit subject>". The commit
+     message reaches the script as an env var, never interpolated into the shell.
    - First real report (Wed night, week 1): 74% to win; **LOCK Durant 51 and Lillard 49.5**,
      roll the rest. All 17 finished games in the matchup rescored to Sleeper's exact counted
      scores -- early support for the scoring config, though none tested the open flags.
