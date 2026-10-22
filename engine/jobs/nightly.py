@@ -33,16 +33,20 @@ import argparse
 import json
 import sys
 from dataclasses import dataclass, field
-from datetime import date
+from datetime import date, datetime, timezone
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 import pandas as pd
+from dotenv import load_dotenv
 
+from engine.ingest.espn import fetch_tip_times
 from engine.ingest.nba_stats import DATA_DIR, GAME_TYPE_REGULAR, previous_seasons
 from engine.ingest.sleeper import Matchup, Player, ScheduledGame, SleeperClient
 from engine.jobs.build_board import load_logs
+from engine.jobs.discord import WEBHOOK_ENV, post, webhook_url
 from engine.jobs.lock_sheet import GameSlot, games_p_play, my_roster, parse_birth_date, team_week_games
-from engine.jobs.runtime import utf8_output
+from engine.jobs.runtime import log_exception, utf8_output
 from engine.model.locks import LockStatus, infer_lock
 from engine.model.matchup import DEFAULT_SIMS, Decision, Odds, Slot, decide, win_probability
 from engine.model.player_model import PlayerModel
@@ -53,6 +57,8 @@ POOL_PATH = Path("data/board/pool.csv")
 DEFAULT_USERNAME = "Squ33gee"
 EMPTY_SLOT = "0"
 SEED = 20261020
+EASTERN = ZoneInfo("America/New_York")
+SNAPSHOT_STALE_DAYS = 8
 
 
 # --- schedule -------------------------------------------------------------------------------
@@ -92,6 +98,8 @@ class Starter:
     lock: LockStatus | None = None
     slot: Slot | None = None
     gap: str = ""
+
+    next_tip: datetime | None = None  # UTC, from ESPN
 
     @property
     def next_game(self) -> date | None:
@@ -154,13 +162,51 @@ def _day(day: date | None) -> str:
     return f"{day:%a %m/%d}" if day else "--"
 
 
+def deadline(starter: Starter) -> str:
+    """When the decision closes: his next tip-off in Eastern time, else just the date."""
+    if starter.next_tip is not None:
+        tip = starter.next_tip.astimezone(EASTERN)
+        return f"{tip:%a} {tip:%I:%M %p}".replace(" 0", " ") + " ET"
+    return f"{_day(starter.next_game)} (tip time unknown)"
+
+
+def render_discord(week: int, their_name: str, mine: list[Starter], my_matchup: Matchup,
+                   their_matchup: Matchup, odds: Odds | None,
+                   decisions: list[tuple[Starter, Decision]], gaps: list[str]) -> str:
+    """The phone version: short lines, no columns, decisions first."""
+    if odds is None:
+        head = f"**Week {week} vs {their_name}** -- win probability not computed (see gaps)"
+    else:
+        head = (f"**Week {week} vs {their_name}: {odds.p_win:.0%} to win**\n"
+                f"Sleeper now {my_matchup.points or 0:g}-{their_matchup.points or 0:g} · "
+                f"projected {odds.my_mean:.0f}-{odds.their_mean:.0f}")
+    lines = [head, ""]
+    if decisions:
+        lines.append("Only if you have **not** already locked him:")
+        for starter, decision in decisions:
+            lines.append(f"**{decision.call.upper()} {starter.name}** -- before {deadline(starter)}")
+            why = (f"counting {decision.pending:g} · lock at {decision.threshold:.1f}+ · "
+                   f"win {decision.p_win_lock:.0%} if locked / {decision.p_win_roll:.0%} if rolled")
+            if decision.matchup_changed_it:
+                why += " · *matchup overrides the points call*"
+            lines.append(why)
+    else:
+        lines.append("No open lock decisions.")
+    locked = [f"{s.name} {s.lock.locked_score:g}" for s in mine if s.lock and s.lock.state == "locked"]
+    if locked:
+        lines += ["", "Locked: " + ", ".join(locked)]
+    if gaps:
+        lines += ["", "Gaps:"] + [f"- {gap}" for gap in gaps]
+    return "\n".join(lines)
+
+
 def decision_line(starter: Starter, decision: Decision) -> str:
     call = decision.call.upper()
     why = (f"counting {decision.pending:g}; lock is worth it at {decision.threshold:.1f}+ on expected "
            f"points; win chance {decision.p_win_lock:.0%} if locked vs {decision.p_win_roll:.0%} if rolled")
     if decision.matchup_changed_it:
         why += " -- the matchup overrides the expected-points call"
-    return f"  {_day(starter.next_game):10} {call:5} {starter.name:24} {why}"
+    return f"  {deadline(starter):18} {call:5} {starter.name:24} {why}"
 
 
 def render(week: int, my_name: str, their_name: str, mine: list[Starter], theirs: list[Starter],
@@ -214,28 +260,34 @@ def _state(s: Starter) -> str:
 # --- main -----------------------------------------------------------------------------------
 
 
-def main() -> int:
-    utf8_output()
-    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--week", type=int, default=None)
-    parser.add_argument("--user", default=DEFAULT_USERNAME)
-    parser.add_argument("--sims", type=int, default=DEFAULT_SIMS)
-    parser.add_argument("--data-dir", type=Path, default=DATA_DIR)
-    args = parser.parse_args()
+def today_eastern() -> date:
+    """Game dates are US dates; a run at 3 am UTC is still the previous evening in New York."""
+    return datetime.now(EASTERN).date()
 
+
+def run(args: argparse.Namespace) -> int:
     config = json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
     season, season_year, league_id = config["season"], config["season"].split("-")[0], config["league_id"]
-    if not POOL_PATH.exists():
-        raise SystemExit(f"missing {POOL_PATH}. Run: uv run python -m engine.jobs.build_board")
-    pool = pd.read_csv(POOL_PATH, dtype={"sleeper_id": str}).set_index("sleeper_id")
+    if not args.pool.exists():
+        raise SystemExit(f"missing {args.pool}. Run: uv run python -m engine.jobs.build_board")
+    pool = pd.read_csv(args.pool, dtype={"sleeper_id": str}).set_index("sleeper_id")
     preseason_path = args.data_dir / f"preseason_logs_{season}.parquet"
     preseason = pd.read_parquet(preseason_path) if preseason_path.exists() else pd.DataFrame()
     model = PlayerModel(load_logs(args.data_dir, season), preseason, previous_seasons(season, 1)[0])
     rules = load_rules()
+    today = today_eastern()
+    gaps: list[str] = []
+    manifest = args.data_dir / "manifest.json"
+    if manifest.exists():  # running from snapshot/ (Actions): say if the model is going stale
+        published = datetime.fromisoformat(json.loads(manifest.read_text(encoding="utf-8"))["published"])
+        age = (datetime.now(timezone.utc) - published).days
+        if age > SNAPSHOT_STALE_DAYS:
+            gaps.append(f"model snapshot is {age} days old -- refresh it on the laptop "
+                        "(ingest_history, build_board, publish_snapshot, push)")
 
     with SleeperClient() as client:
         games = client.get_nba_schedule(season_year)
-        week = args.week or week_containing(games, date.today())
+        week = args.week or week_containing(games, today)
         roster = my_roster(client, league_id, args.user)
         matchups = client.get_matchups_live(league_id, week)
         users = {u.user_id: u.display_name for u in client.get_users(league_id)}
@@ -249,8 +301,6 @@ def main() -> int:
         status = {}
         for g in games:
             status[(g.home, g.date)] = status[(g.away, g.date)] = g.status
-
-        gaps: list[str] = []
 
         def starters_of(m: Matchup) -> list[Starter]:
             built = []
@@ -276,6 +326,18 @@ def main() -> int:
 
         mine, theirs = starters_of(mine_m), starters_of(theirs_m)
 
+    # Deadlines need tip-off times; Sleeper has none, so they come from ESPN. A failure here
+    # costs only the clock time, so it is a gap, not a crash.
+    next_days = {s.next_game for s in mine if s.next_game}
+    try:
+        tips = fetch_tip_times(next_days)
+    except Exception as error:
+        tips = {}
+        gaps.append(f"tip-off times unavailable from ESPN ({type(error).__name__}); deadlines by date only")
+    for starter in mine:
+        if starter.next_game:
+            starter.next_tip = tips.get((starter.team, starter.next_game.isoformat()))
+
     my_slots = [s.slot for s in mine]
     their_slots = [s.slot for s in theirs]
     odds, decisions = None, []
@@ -284,11 +346,58 @@ def main() -> int:
         for index, starter in enumerate(mine):
             if starter.slot.decision_open:
                 decisions.append((starter, decide(my_slots, their_slots, index, args.sims, SEED)))
-        decisions.sort(key=lambda pair: (pair[0].next_game or date.max, pair[0].name))
+        decisions.sort(key=lambda pair: (pair[0].next_tip or datetime.max.replace(tzinfo=timezone.utc),
+                                         pair[0].next_game or date.max, pair[0].name))
 
-    print(render(week, owners[mine_m.roster_id], owners[theirs_m.roster_id], mine, theirs,
-                 mine_m, theirs_m, odds, decisions, gaps))
+    my_name, their_name = owners[mine_m.roster_id], owners[theirs_m.roster_id]
+    print(render(week, my_name, their_name, mine, theirs, mine_m, theirs_m, odds, decisions, gaps))
+
+    if args.post:
+        due_today = [d for d in decisions if d[0].next_game == today]
+        if args.only_if_due_today and not due_today:
+            print("\nnot posted: no decision is due today")
+            return 0
+        shown = due_today if args.only_if_due_today else decisions
+        message = render_discord(week, their_name, mine, mine_m, theirs_m, odds, shown, gaps)
+        post_or_say(message)
     return 0
+
+
+def post_or_say(message: str) -> None:
+    url = webhook_url()
+    if url is None:
+        print(f"\nnot posted: {WEBHOOK_ENV} is not set (.env locally, a repository secret in Actions)")
+        return
+    post(message, url)
+    print("\nposted to Discord")
+
+
+def main() -> int:
+    utf8_output()
+    load_dotenv()
+    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument("--week", type=int, default=None)
+    parser.add_argument("--user", default=DEFAULT_USERNAME)
+    parser.add_argument("--sims", type=int, default=DEFAULT_SIMS)
+    parser.add_argument("--data-dir", type=Path, default=DATA_DIR)
+    parser.add_argument("--pool", type=Path, default=POOL_PATH)
+    parser.add_argument("--post", action="store_true", help="also post the report to Discord")
+    parser.add_argument("--only-if-due-today", action="store_true",
+                        help="with --post: post only decisions whose next game is today (the afternoon reminder)")
+    args = parser.parse_args()
+    try:
+        return run(args)
+    except Exception as error:
+        # A scheduled run that dies quietly is the 18:31 incident again: log it, and say so in
+        # Discord too when posting, then fail the run so Actions shows it red.
+        log_path = log_exception("nightly", error)
+        if args.post:
+            try:
+                post_or_say(f"**Nightly advisor failed**: {type(error).__name__}: {error}"[:1900])
+            except Exception:
+                pass
+        print(f"nightly failed; traceback in {log_path}", file=sys.stderr)
+        raise
 
 
 if __name__ == "__main__":

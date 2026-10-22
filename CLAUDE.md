@@ -56,7 +56,7 @@ pushed.
 Everything runnable today, in the order you would use it:
 
 ```
-uv run pytest                                             # 361 tests, none need the network
+uv run pytest                                             # 366 tests, none need the network
 uv run python -m engine.jobs.verify_league                # config vs live Sleeper; exits 1 on drift
 uv run python -m engine.jobs.ingest_history [--force]     # LOCAL ONLY: logs + schedule -> parquet
 uv run python -m engine.jobs.build_board [--top 150]      # -> data/board/{board.csv,board.html,pool.csv}
@@ -65,13 +65,14 @@ uv run python -m engine.jobs.draft_rehearsal [--slot 5] [--drafts 2]   # synthet
 uv run python -m engine.jobs.draft_rehearsal --calibrate                # 2025 replay -> sigma
 uv run python -m engine.jobs.draft_live [--draft-id <mock id>] [--slot N] # -> data/draft/live.html
 uv run python -m engine.jobs.lock_sheet [--week N]                      # -> data/lock/lock_sheet.html
-uv run python -m engine.jobs.nightly [--week N] [--sims 20000]          # win prob + LOCK/ROLL, terminal
+uv run python -m engine.jobs.nightly [--week N] [--post]                # win prob + LOCK/ROLL; --post -> Discord
+uv run python -m engine.jobs.publish_snapshot                           # data/ -> snapshot/ for Actions; commit it
 uv run python -m engine.jobs.probe_endpoints                            # stdlib only; also runs in Actions
 ```
 
 Per-file test counts: scoring 89, distributions 38, lockin 37, nba_stats 26, lineup 25,
 player_ids 22, draft_sim 29, lock_sheet 17, rookies 14, valuation 11, draft_live 11,
-verify_league 8, runtime 4, matchup 13, locks 9, nightly 8.
+verify_league 8, runtime 4, matchup 13, locks 9, nightly 8, alerts 5.
 
 `data/` is gitignored and regenerable. **On a fresh checkout run `ingest_history` then
 `build_board` before anything else** -- the 2026-10-16 session started with no `data/` at all.
@@ -684,10 +685,25 @@ LeBron Sat 38.7 -> 34.0, Kyrie Fri 34.8 -> 30.6); starting nine week value 482.9
      the suite.
    - **`nightly.py`** prints the report to the terminal. First live run (Wed 10/21, games in
      progress): 87% to win week 1 vs 2jake4davis6; Brown and LeBron ROLL, matchup agrees.
-   **Still to do:** Discord post (`DISCORD_WEBHOOK_URL`, user setting it up 2026-10-21
-   evening); ESPN tip times for deadlines; `pool.csv` + game-log parquet available to Actions;
-   the scheduled workflow (bump `actions/checkout` to v5 and `setup-python` to v6 -- v4/v5 warn
-   about Node 20); the week-long Sleeper-vs-stats.nba.com box-score diff (~2026-10-27).
+   **Also done, later 2026-10-21:**
+   - **Discord** (`engine/jobs/discord.py`): `nightly --post` sends a short phone version
+     (`render_discord`), split under Discord's 2000-char cap. The user created the webhook and
+     the `DISCORD_WEBHOOK_URL` repository secret that evening; their local `.env` is not made
+     yet, so local runs print "not posted". A failed run posts "Nightly advisor failed" and
+     exits non-zero.
+   - **Tip times** (`engine/ingest/espn.py`): ESPN abbreviates six teams differently (GS, NO,
+     NY, SA, UTAH, WSH -> GSW, NOP, NYK, SAS, UTA, WAS); unknown codes are dropped, not
+     guessed. Deadlines print in ET; decisions are ordered by tip-off.
+   - **`snapshot/`** (committed, ~1.2 MB): `publish_snapshot` copies `pool.csv` and the game
+     logs there for Actions. It is a copy, so the cloud model learns this season only when
+     refreshed from the laptop; the report flags it once it is over 8 days old. Rebuilding
+     current-season logs from Sleeper's per-game stats in the cloud would remove that chore.
+   - **`.github/workflows/nightly.yml`**: 07:43 UTC full report, 19:43 UTC reminder only if a
+     decision is due that day, plus manual runs. Both workflows on checkout v5 / setup-python v6.
+   - First real report (Wed night, week 1): 74% to win; **LOCK Durant 51 and Lillard 49.5**,
+     roll the rest. All 17 finished games in the matchup rescored to Sleeper's exact counted
+     scores -- early support for the scoring config, though none tested the open flags.
+   **Still to do:** the week-long Sleeper-vs-stats.nba.com box-score diff (~2026-10-27).
 5. **Resolve the scoring ambiguities** after the first week-1 games: rescore real box scores
    through `scoring.py` under every flag combination, diff against Sleeper matchup
    `players_points`, set `bonuses_stack` / `td_includes_dd` in `config/league.json` with the
