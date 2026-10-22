@@ -35,7 +35,7 @@ ends with the user taking the action in the Sleeper app.
    accurate when written but these are mostly undocumented or fast-moving APIs. Probe first,
    then write the client.
 
-## Current state (2026-10-21)
+## Current state (2026-10-22)
 
 **The draft is done** (Sunday 2026-10-18, see "The draft" below). **Phase 3 (in-season) has
 started**, following a seven-step plan the user set on 2026-10-19 (see "Phase 3 plan and
@@ -47,7 +47,9 @@ later, separate step. **Step 3 is done** (2026-10-21): every job prints UTF-8 an
 advisor's whole poll is guarded (`engine/jobs/runtime.py`). The season opened Tuesday
 2026-10-20. On 2026-10-21 the user also corrected the league rules (2 IR slots,
 reverse-standings priority waivers, no FAAB) and chose a **cloud-first nightly job with
-Discord alerts** for step 4.
+Discord alerts** for step 4, which is built and running (one check left, ~2026-10-27).
+**Step 5 is done** (2026-10-22): both scoring flags are true, settled from last season's
+league. **Next is step 6** (age and role awareness).
 
 **Working agreement for phase 3:** do the steps in order and **stop after each one** for the
 user to review. Commits are `phase3: <what>`. The user asks before anything is committed or
@@ -56,7 +58,7 @@ pushed.
 Everything runnable today, in the order you would use it:
 
 ```
-uv run pytest                                             # 366 tests, none need the network
+uv run pytest                                             # 372 tests, none need the network
 uv run python -m engine.jobs.verify_league                # config vs live Sleeper; exits 1 on drift
 uv run python -m engine.jobs.ingest_history [--force]     # LOCAL ONLY: logs + schedule -> parquet
 uv run python -m engine.jobs.build_board [--top 150]      # -> data/board/{board.csv,board.html,pool.csv}
@@ -68,11 +70,12 @@ uv run python -m engine.jobs.lock_sheet [--week N]                      # -> dat
 uv run python -m engine.jobs.nightly [--week N] [--post]                # win prob + LOCK/ROLL; --post -> Discord
 uv run python -m engine.jobs.publish_snapshot                           # data/ -> snapshot/ for Actions; commit it
 uv run python -m engine.jobs.probe_endpoints                            # stdlib only; also runs in Actions
+uv run python -m engine.jobs.resolve_scoring                            # flags vs Sleeper counted scores
 ```
 
 Per-file test counts: scoring 89, distributions 38, lockin 37, nba_stats 26, lineup 25,
-player_ids 22, draft_sim 29, lock_sheet 17, rookies 14, valuation 11, draft_live 11,
-verify_league 8, runtime 4, matchup 13, locks 9, nightly 8, alerts 5.
+player_ids 23, draft_sim 29, lock_sheet 17, rookies 14, valuation 11, draft_live 11,
+verify_league 8, runtime 4, matchup 13, locks 9, nightly 8, alerts 5, resolve_scoring 5.
 
 `data/` is gitignored and regenerable. **On a fresh checkout run `ingest_history` then
 `build_board` before anything else** -- the 2026-10-16 session started with no `data/` at all.
@@ -131,13 +134,9 @@ advisor's survival model (see M5) and shows per-coach tendencies (cyapp1 reaches
 
 ### Blockers, in priority order
 
-1. **No in-season tooling, and week 1 starts 2026-10-20.** M6 (nightly lock advisor) is not
-   started; until it exists, lock decisions are the user's alone.
-2. **Both `scoring_ambiguities` remain unresolved** (`bonuses_stack`, `td_includes_dd`). Per
-   SPEC §4 the empirical fix is to recompute real week-1 box scores and diff against Sleeper's
-   own totals, which is impossible before the season opens. Both branches stay behind flags.
-   Resolving them is a one-line config change, not a code change. **Do this after week 1's
-   first games** -- it is now possible, and M6's thresholds depend on it.
+None open as of 2026-10-22. The nightly advisor runs in GitHub Actions and posts to Discord
+(step 4), and both scoring flags are resolved (step 5, below). What is left is the phase 3
+plan itself.
 
 ### What the live league changed vs docs/SPEC.md
 
@@ -301,6 +300,12 @@ in the draft room when the wifi or the live advisor has died.
 Pieces: `engine/ingest/player_ids.py` (identity), `engine/model/lineup.py` (slot assignment),
 `engine/model/valuation.py` (replacement level and VOR), `engine/jobs/build_board.py`.
 
+- **Regression found and fixed 2026-10-22:** Sleeper's `search_full_name` started carrying
+  generational suffixes run together ("jabarismithjr"), where the suffix strip cannot see a
+  word boundary, and the matcher preferred that field -- so all 32 Jr./II/III players went
+  unmapped overnight and dropped out of `pool.csv`. Each player is now indexed under both
+  `full_name` and `search_full_name`; 808/809 map (1 real duplicate name). The gap list is
+  what caught it, which is exactly why gaps are printed and never dropped.
 - **Player identity: 506/506 mapped, no gaps.** Sleeper's NBA dictionary has no NBA.com id
   (it has sportradar, swish, rotowire, kalshi — not this one), so the join is by name.
   Normalising accents, punctuation and generational suffixes, then breaking ties by team, maps
@@ -704,10 +709,16 @@ LeBron Sat 38.7 -> 34.0, Kyrie Fri 34.8 -> 30.6); starting nine week value 482.9
      roll the rest. All 17 finished games in the matchup rescored to Sleeper's exact counted
      scores -- early support for the scoring config, though none tested the open flags.
    **Still to do:** the week-long Sleeper-vs-stats.nba.com box-score diff (~2026-10-27).
-5. **Resolve the scoring ambiguities** after the first week-1 games: rescore real box scores
-   through `scoring.py` under every flag combination, diff against Sleeper matchup
-   `players_points`, set `bonuses_stack` / `td_includes_dd` in `config/league.json` with the
-   evidence in the comment fields. Jokic is the most affected player.
+5. ~~Resolve the scoring ambiguities~~ -- **done 2026-10-22: both true.** `engine/jobs/
+   resolve_scoring.py` used **last season's league** (identical scoring, Lock-In, complete)
+   instead of waiting for week 1: 2666 player-weeks, each game rescored under all four flag
+   combinations against Sleeper's counted `players_points`. 54 weeks could tell them apart
+   (triple-doubles, 50-point games); only `bonuses_stack=true, td_includes_dd=true` matched
+   all 54 (the old default matched 0, stack-only 8, dd-only 45). **0 of 2666 unexplained**,
+   so the whole scoring engine is confirmed against Sleeper, not just the flags. A 50-point
+   game pays 40+ and 50+ (7); a triple-double pays dd and td (7). Effect: Jokic +1.32
+   fp/game (+2.58 VOR), Giddey +0.53, Doncic +0.42; 123 of 496 players move at all. Board
+   and `snapshot/` rebuilt. Thursday calls unchanged (Brown 54.8, LeBron 49.4).
 6. **Age + role awareness:** year-over-year fp/game and minutes change by age band from the
    logs, applied as a *scaling* of the distribution (like `rookies.py`), with before/after
    values for the user's roster; a team-changer flag (Brown and LeBron to PHI, Kawhi to TOR,

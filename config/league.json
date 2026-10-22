@@ -74,14 +74,14 @@
   },
 
   "scoring_ambiguities": {
-    "_comment": "Unresolved. Implement both branches behind these flags; default to the conservative reading and confirm with the commissioner or by inspecting a real box score in week 1.",
+    "_comment": "RESOLVED 2026-10-22, both true, by engine/jobs/resolve_scoring.py against last season's league (1275683545209122816: identical scoring_settings, Lock-In). For each of 2666 player-weeks, every game he played was rescored under all four flag combinations and compared with the score Sleeper counted (matchup players_points). 2612 could not tell the combinations apart; 54 could (triple-doubles and 50-point games), and ONLY bonuses_stack=true + td_includes_dd=true matched all 54. The alternatives matched 0/54 (both false, the old default), 8/54 (stack only) and 45/54 (dd only). 0 of the 2666 matched no combination, so the rest of the scoring is confirmed too. Decisive case: Jokic week 10, Sleeper 128, matched only by both true. Rerun the job to re-check.",
     "bonuses_stack": {
-      "value": false,
-      "question": "Does a 50-point game score both bonus_40_pts and bonus_50_pts (7) or only bonus_50_pts (4)?"
+      "value": true,
+      "question": "Does a 50-point game score both bonus_40_pts and bonus_50_pts (7) or only bonus_50_pts (4)? Both: 7."
     },
     "td_includes_dd": {
-      "value": false,
-      "question": "Does a triple-double also award the double-double bonus (7 total) or only the triple-double bonus (4)?"
+      "value": true,
+      "question": "Does a triple-double also award the double-double bonus (7 total) or only the triple-double bonus (4)? Both: 7."
     },
     "quadruple_double": {
       "value": "treat_as_td",

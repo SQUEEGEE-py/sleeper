@@ -26,10 +26,11 @@ class FakePlayer:
     full_name: str
     team: str | None = None
     fantasy_positions: list[str] | None = None
+    search_full_name: str | None = None
 
     @property
     def model_extra(self) -> dict:
-        return {"search_full_name": self.full_name}
+        return {"search_full_name": self.search_full_name or self.full_name}
 
 
 @pytest.mark.parametrize(
@@ -68,6 +69,22 @@ def test_maps_across_accent_and_suffix_differences() -> None:
     assert result.nba_to_sleeper == {1: "100", 2: "200"}
     assert result.gap_count == 0
     assert "no gaps" in result.describe()
+
+
+def test_sleepers_run_together_search_name_does_not_hide_a_suffix() -> None:
+    # Real Sleeper payload, 2026-10-22: search_full_name keeps the suffix with no spaces, so
+    # only full_name lets the suffix be stripped. Matching on search_full_name alone left
+    # every Jr./II/III player unmapped.
+    sleeper = {
+        "1": FakePlayer("Jabari Smith Jr.", "HOU", search_full_name="jabarismithjr"),
+        "2": FakePlayer("Trey Murphy III", "NOP", search_full_name="treymurphyiii"),
+        "3": FakePlayer("Nikola Jokic", "DEN", search_full_name="nikolajokic"),
+    }
+    result = map_players(
+        [(10, "Jabari Smith Jr.", "HOU"), (20, "Trey Murphy III", "NOP"), (30, "Nikola Jokić", "DEN")],
+        sleeper,
+    )
+    assert result.nba_to_sleeper == {10: "1", 20: "2", 30: "3"} and result.gap_count == 0
 
 
 def test_unmapped_players_are_reported_not_dropped() -> None:

@@ -157,13 +157,16 @@ def map_players(
     ``nba_players`` is ``(nba_player_id, name, team)``; ``sleeper_players`` is the dict from
     ``SleeperClient.get_players()``. Overrides win outright over any name match.
     """
-    by_name: dict[str, list[tuple[str, object]]] = {}
+    # Each player is indexed under both of Sleeper's names. ``search_full_name`` is run together
+    # with no spaces ("jabarismithjr"), so the suffix strip cannot see a word boundary in it;
+    # until about 2026-10-21 Sleeper left suffixes out of it, and when they appeared 32 players
+    # (every Jr., II and III) silently became unmapped. ``full_name`` keeps the spaces.
+    by_name: dict[str, dict[str, object]] = {}
     for sleeper_id, player in sleeper_players.items():
         extra = getattr(player, "model_extra", None) or {}
-        raw_name = extra.get("search_full_name") or getattr(player, "full_name", None)
-        if not raw_name:
-            continue
-        by_name.setdefault(normalize_name(raw_name), []).append((sleeper_id, player))
+        for raw_name in (getattr(player, "full_name", None), extra.get("search_full_name")):
+            if raw_name:
+                by_name.setdefault(normalize_name(raw_name), {})[sleeper_id] = player
 
     forced: dict[int, str] = {}
     forced_by_name: dict[str, str] = {}
@@ -185,7 +188,7 @@ def map_players(
             result.nba_to_sleeper[nba_id] = forced_by_name[key]
             continue
 
-        candidates = by_name.get(key, [])
+        candidates = list(by_name.get(key, {}).items())
         if not candidates:
             result.unmapped.append((nba_id, name, team))
             continue
