@@ -56,7 +56,7 @@ pushed.
 Everything runnable today, in the order you would use it:
 
 ```
-uv run pytest                                             # 331 tests, none need the network
+uv run pytest                                             # 361 tests, none need the network
 uv run python -m engine.jobs.verify_league                # config vs live Sleeper; exits 1 on drift
 uv run python -m engine.jobs.ingest_history [--force]     # LOCAL ONLY: logs + schedule -> parquet
 uv run python -m engine.jobs.build_board [--top 150]      # -> data/board/{board.csv,board.html,pool.csv}
@@ -65,11 +65,13 @@ uv run python -m engine.jobs.draft_rehearsal [--slot 5] [--drafts 2]   # synthet
 uv run python -m engine.jobs.draft_rehearsal --calibrate                # 2025 replay -> sigma
 uv run python -m engine.jobs.draft_live [--draft-id <mock id>] [--slot N] # -> data/draft/live.html
 uv run python -m engine.jobs.lock_sheet [--week N]                      # -> data/lock/lock_sheet.html
+uv run python -m engine.jobs.nightly [--week N] [--sims 20000]          # win prob + LOCK/ROLL, terminal
+uv run python -m engine.jobs.probe_endpoints                            # stdlib only; also runs in Actions
 ```
 
 Per-file test counts: scoring 89, distributions 38, lockin 37, nba_stats 26, lineup 25,
 player_ids 22, draft_sim 29, lock_sheet 17, rookies 14, valuation 11, draft_live 11,
-verify_league 8, runtime 4.
+verify_league 8, runtime 4, matchup 13, locks 9, nightly 8.
 
 `data/` is gitignored and regenerable. **On a fresh checkout run `ingest_history` then
 `build_board` before anything else** -- the 2026-10-16 session started with no `data/` at all.
@@ -79,12 +81,12 @@ What exists and works:
 
 - `uv` project on Python 3.11 with the M0 deps. Run anything with `uv run python -m <module>`.
 - Repo skeleton from SPEC §1. The only **empty placeholder files, not stubs**, left are
-  `engine/ingest/markets.py`, `engine/ingest/news.py` and `engine/jobs/nightly.py` (0 bytes on
-  purpose; SPEC §1's `matchup.py` does not exist yet). Real so far: `scoring.py` (M1),
+  `engine/ingest/markets.py` and `engine/ingest/news.py` (0 bytes on purpose). Real so far: `scoring.py` (M1),
   `nba_stats.py` (M2), `distributions.py` and `lockin.py` (M3), `player_ids.py`, `lineup.py`,
   `valuation.py` and `build_board.py` (M4), `rookies.py` (pre-draft fixes), `draft_sim.py`,
   `draft_live.py` and `draft_rehearsal.py` (M5, cut down), `player_model.py` and
-  `lock_sheet.py` (phase 3 step 1).
+  `lock_sheet.py` (phase 3 step 1), `runtime.py` (step 3), `matchup.py`, `locks.py`,
+  `nightly.py` and `probe_endpoints.py` (step 4, in progress).
 - `engine/ingest/sleeper.py` — typed pydantic client for the SPEC §2.1 endpoints. Every
   response is cached to disk under `data/cache/sleeper/` with a fetch timestamp; `players/nba`
   is TTL-capped at 24h. Reruns and tests never need the network.
@@ -660,6 +662,32 @@ LeBron Sat 38.7 -> 34.0, Kyrie Fri 34.8 -> 30.6); starting nine week value 482.9
    Before relying on them: a one-off Actions workflow that probes every endpoint from GitHub's
    IPs (rule 6), and a local week-long diff of Sleeper box scores vs stats.nba.com. Actions
    cron can start 5-30 min late, so alerts fire well before tip-off, never at the deadline.
+
+   **Status 2026-10-21 -- done:**
+   - **Probe passed from GitHub Actions** (`probe_endpoints.yml`, run 39696604428): all 10
+     required Sleeper/ESPN endpoints answer from GitHub's IPs. Whether stats.nba.com and
+     cdn.nba.com do is unknown (step logs need a GitHub login); nothing depends on them.
+   - **Sleeper's schedule = ours**: all 1200 games agree on date, teams and week; ours has 3
+     extra TBD NBA Cup placeholders. So `nightly` uses Sleeper's schedule directly.
+   - **Sleeper per-game stats carry `tf`/`ff`** (technicals, flagrants -- missing from
+     stats.nba.com logs) and its own `dd`/`bonus_pt_*` keys. `scoring.box_from_sleeper_stats`
+     converts; Brown 43.5 and LeBron 38.0 on 10/20 rescore to Sleeper's exact totals.
+   - **No lock field in the public API** (matchups, rosters, roster settings, league all
+     checked). `locks.infer_lock` infers it from `starters_points`: counting an earlier game
+     = locked on it; counting the latest = "open" (unlocked or locked tonight -- cannot be told
+     apart until his next game); matching nothing = a visible gap. **No manual confirmation**:
+     a cloud job cannot take input, so advice is phrased "only if you have NOT locked him".
+   - **`matchup.py`**: simulates both lineups through the week (threshold policy, per-game
+     B2B `p_play`, forced final game, 0 if he sits), common random numbers per slot, and
+     `decide` = LOCK vs ROLL by chance of winning the week; falls back to the expected-points
+     call within 2 standard errors. Reproduces M3's 51.297 by simulation. 5 mutations fail
+     the suite.
+   - **`nightly.py`** prints the report to the terminal. First live run (Wed 10/21, games in
+     progress): 87% to win week 1 vs 2jake4davis6; Brown and LeBron ROLL, matchup agrees.
+   **Still to do:** Discord post (`DISCORD_WEBHOOK_URL`, user setting it up 2026-10-21
+   evening); ESPN tip times for deadlines; `pool.csv` + game-log parquet available to Actions;
+   the scheduled workflow (bump `actions/checkout` to v5 and `setup-python` to v6 -- v4/v5 warn
+   about Node 20); the week-long Sleeper-vs-stats.nba.com box-score diff (~2026-10-27).
 5. **Resolve the scoring ambiguities** after the first week-1 games: rescore real box scores
    through `scoring.py` under every flag combination, diff against Sleeper matchup
    `players_points`, set `bonuses_stack` / `td_includes_dd` in `config/league.json` with the

@@ -26,6 +26,8 @@ BASE_URL = "https://api.sleeper.app/v1"
 # backtest anything against them. ADP looks genuinely pre-season (Knueppel 132 before his
 # breakout, unranked players at 999), which is what the sigma calibration relies on.
 PROJECTIONS_URL = "https://api.sleeper.com/projections/nba"
+SLEEPER_STATS_URL = "https://api.sleeper.com/stats/nba"
+SLEEPER_SCHEDULE_URL = "https://api.sleeper.com/schedule/nba/regular"
 ADP_CACHE_TTL_SECONDS = 6 * 60 * 60
 DEFAULT_CACHE_DIR = Path("data/cache/sleeper")
 
@@ -75,6 +77,23 @@ class Matchup(BaseModel):
     starters: list[str] | None
     players_points: dict[str, float] | None = None
     starters_points: list[float] | None = None
+
+
+class PlayerGame(BaseModel):
+    """One game of a player's Sleeper stats. Keys are Sleeper's scoring keys."""
+
+    week: int
+    date: str  # "YYYY-MM-DD", US date of the game
+    stats: dict[str, float | None]
+
+
+class ScheduledGame(BaseModel):
+    game_id: str
+    date: str
+    week: int
+    status: str  # pre_game | in_game | complete
+    home: str
+    away: str
 
 
 class Draft(BaseModel):
@@ -235,6 +254,41 @@ class SleeperClient:
         for a completed draft and wrong for one in progress."""
         data = self._get_fresh(f"/draft/{draft_id}/picks", f"draft_picks_{draft_id}")
         return [DraftPick.model_validate(p) for p in data]
+
+    def get_matchups_live(self, league_id: str, week: int) -> list[Matchup]:
+        """This week's matchups, never from cache: ``starters_points`` moves with every game.
+        There is no lock field (probed 2026-10-21); see ``engine/model/locks.py``."""
+        data = self._get_fresh(f"/league/{league_id}/matchups/{week}", f"matchups_{league_id}_{week}")
+        return [Matchup.model_validate(m) for m in data]
+
+    def get_player_games(self, player_id: str, season: str) -> list[PlayerGame]:
+        """Every regular-season game a player has stats for, dated, never from cache.
+
+        ``api.sleeper.com/stats/nba/player/{id}?grouping=week`` (probed 2026-10-21) returns
+        ``{week: [game, ...]}``. A game he did not play has no entry. Works from cloud IPs,
+        unlike stats.nba.com, and carries ``tf``/``ff``, which stats.nba.com's logs lack.
+        """
+        data = self._get_fresh(
+            f"{SLEEPER_STATS_URL}/player/{player_id}?season_type=regular&season={season}&grouping=week",
+            f"player_games_{season}_{player_id}",
+        )
+        return [
+            PlayerGame(week=int(week), date=game["date"], stats=game.get("stats") or {})
+            for week, games in (data or {}).items()
+            for game in (games or [])
+            if game and game.get("date")
+        ]
+
+    def get_nba_schedule(self, season: str) -> list[ScheduledGame]:
+        """The regular-season schedule with live status (``pre_game`` / ``in_game`` /
+        ``complete``), never from cache. NBA tricodes; ``week`` is the fantasy week. No tip-off
+        times -- those come from ESPN."""
+        data = self._get_fresh(f"{SLEEPER_SCHEDULE_URL}/{season}", f"nba_schedule_{season}")
+        return [
+            ScheduledGame(game_id=g["game_id"], date=g["date"], week=int(g["week"]), status=g["status"],
+                          home=g["home"]["team"], away=g["away"]["team"])
+            for g in data
+        ]
 
     def get_adp(self, season: str) -> dict[str, float]:
         """Sleeper redraft ADP (``adp_std``) by Sleeper player id. Players without one are

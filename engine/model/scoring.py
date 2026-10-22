@@ -252,3 +252,13 @@ def score_box(box: BoxScore, rules: ScoringRules | None = None) -> float:
     """Fantasy points for one line. Every fantasy-point number in this codebase comes from
     here."""
     return score_breakdown(box, rules).total
+
+
+def box_from_sleeper_stats(stats: dict[str, float | None]) -> BoxScore:
+    """A box score from one game of Sleeper's per-game stats (``api.sleeper.com/stats/...``).
+
+    Sleeper's stat keys are its scoring keys, so ``STAT_FIELD_TO_SCORING_KEY`` is the whole
+    translation. Probed 2026-10-21: the keys include ``tf`` and ``ff``, which stats.nba.com's
+    game logs never had. A stat missing from a line is a zero (Sleeper omits zeros).
+    """
+    return BoxScore(**{field: float(stats.get(key) or 0.0) for field, key in STAT_FIELD_TO_SCORING_KEY.items()})

@@ -129,6 +129,10 @@ class NormalScoreDistribution:
         pdf = math.exp(-0.5 * z * z) / math.sqrt(2.0 * math.pi)
         return threshold * cdf + self.mu * (1.0 - cdf) + self.sigma * pdf
 
+    def sample(self, rng: np.random.Generator, size: int) -> np.ndarray:
+        """``size`` scores **conditional on playing**, for the matchup simulation."""
+        return rng.normal(self.mu, max(self.sigma, 0.0), size)
+
 
 @dataclass(frozen=True)
 class EmpiricalScoreDistribution:
@@ -174,6 +178,11 @@ class EmpiricalScoreDistribution:
 
     def expected_max(self, threshold: float) -> float:
         return float(np.dot(self._normalized_weights(), np.maximum(self.values, threshold)))
+
+    def sample(self, rng: np.random.Generator, size: int) -> np.ndarray:
+        """``size`` scores **conditional on playing**, drawn from the weighted sample itself --
+        not a fitted curve, so the 40+/50+ bonus tail survives into the simulation."""
+        return rng.choice(self.values, size=size, p=self._normalized_weights())
 
     def quantile(self, q: float) -> float:
         """Weighted quantile. Used for the board's ceiling/floor columns."""
