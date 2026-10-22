@@ -49,7 +49,8 @@ from engine.jobs.lock_sheet import GameSlot, games_p_play, my_roster, parse_birt
 from engine.jobs.runtime import log_exception, utf8_output
 from engine.model.locks import LockStatus, infer_lock
 from engine.model.matchup import DEFAULT_SIMS, Decision, Odds, Slot, decide, win_probability
-from engine.model.player_model import PlayerModel
+from engine.model.player_model import PlayerModel, birth_dates_by_nba_id
+from engine.model.roles import MIN_GAMES, RoleCheck, role_check
 from engine.model.scoring import box_from_sleeper_stats, load_rules, score_box
 
 CONFIG_PATH = Path("config/league.json")
@@ -172,7 +173,8 @@ def deadline(starter: Starter) -> str:
 
 def render_discord(week: int, their_name: str, mine: list[Starter], my_matchup: Matchup,
                    their_matchup: Matchup, odds: Odds | None,
-                   decisions: list[tuple[Starter, Decision]], gaps: list[str]) -> str:
+                   decisions: list[tuple[Starter, Decision]], gaps: list[str],
+                   roles: list[RoleCheck] | None = None) -> str:
     """The phone version: short lines, no columns, decisions first."""
     if odds is None:
         head = f"**Week {week} vs {their_name}** -- win probability not computed (see gaps)"
@@ -195,6 +197,9 @@ def render_discord(week: int, their_name: str, mine: list[Starter], my_matchup: 
     locked = [f"{s.name} {s.lock.locked_score:g}" for s in mine if s.lock and s.lock.state == "locked"]
     if locked:
         lines += ["", "Locked: " + ", ".join(locked)]
+    flagged = [r for r in roles or [] if r.flagged]
+    if flagged:
+        lines += ["", "Role change:"] + [f"- {r.describe()}" for r in flagged]
     if gaps:
         lines += ["", "Gaps:"] + [f"- {gap}" for gap in gaps]
     return "\n".join(lines)
@@ -211,7 +216,8 @@ def decision_line(starter: Starter, decision: Decision) -> str:
 
 def render(week: int, my_name: str, their_name: str, mine: list[Starter], theirs: list[Starter],
            my_matchup: Matchup, their_matchup: Matchup, odds: Odds | None,
-           decisions: list[tuple[Starter, Decision]], gaps: list[str]) -> str:
+           decisions: list[tuple[Starter, Decision]], gaps: list[str],
+           roles: list[RoleCheck] | None = None) -> str:
     lines = [f"WEEK {week}: {my_name} vs {their_name}"]
     lines.append(f"Sleeper now: {my_matchup.points or 0:g} - {their_matchup.points or 0:g}")
     if odds is None:
@@ -232,6 +238,9 @@ def render(week: int, my_name: str, their_name: str, mine: list[Starter], theirs
     lines.append(f"\n{their_name.upper()}'S STARTERS")
     for s in theirs:
         lines.append(f"  {s.name:24} {_state(s)}")
+    if roles:
+        lines.append(f"\nROLE WATCH (your roster; minutes this season vs his latest earlier season, judged from {MIN_GAMES} games)")
+        lines += [f"  {'!! ' if r.flagged else '   '}{r.describe()}" for r in roles]
     lines.append("\nAssumes the opponent locks by the expected-points thresholds. Locks are inferred "
                  "from Sleeper's counted scores; a lock on the latest game cannot be seen until the next one.")
     if gaps:
@@ -260,6 +269,33 @@ def _state(s: Starter) -> str:
 # --- main -----------------------------------------------------------------------------------
 
 
+def role_watch(roster: list[str], pool: pd.DataFrame, model: PlayerModel, players: dict,
+               season_games) -> list[RoleCheck]:
+    """Minutes this season (Sleeper per-game ``min``, so it works in Actions) against his most
+    recent earlier season in the model's logs -- not always last season: Lillard and Kyrie
+    missed 2025-26 injured. Every player on the user's roster, flagged first."""
+    earlier = model.logs[model.logs["season"] != model.season].sort_values("game_date")
+    latest = earlier.groupby("nba_player_id")["season"].last()
+    earlier = earlier[earlier["season"] == earlier["nba_player_id"].map(latest)]
+    last_minutes = earlier.groupby("nba_player_id")["minutes"].mean()
+    last_team = earlier.groupby("nba_player_id")["team"].last()
+    checks = []
+    for player_id in roster:
+        player = players.get(player_id)
+        name = (player.full_name if player else None) or player_id
+        nba_id = int(pool.loc[player_id, "nba_player_id"]) if player_id in pool.index else None
+        minutes = [float(g.stats["min"]) for g in season_games(player_id) if g.stats.get("min")]
+        known = nba_id is not None and nba_id in last_minutes.index
+        checks.append(role_check(
+            name, (player.team if player else None) or "?",
+            last_team[nba_id] if known else None,
+            minutes,
+            float(last_minutes[nba_id]) if known else None,
+            latest[nba_id] if known else None,
+        ))
+    return sorted(checks, key=lambda c: (not c.flagged, not c.new_team, c.name))
+
+
 def today_eastern() -> date:
     """Game dates are US dates; a run at 3 am UTC is still the previous evening in New York."""
     return datetime.now(EASTERN).date()
@@ -273,7 +309,8 @@ def run(args: argparse.Namespace) -> int:
     pool = pd.read_csv(args.pool, dtype={"sleeper_id": str}).set_index("sleeper_id")
     preseason_path = args.data_dir / f"preseason_logs_{season}.parquet"
     preseason = pd.read_parquet(preseason_path) if preseason_path.exists() else pd.DataFrame()
-    model = PlayerModel(load_logs(args.data_dir, season), preseason, previous_seasons(season, 1)[0])
+    model = PlayerModel(load_logs(args.data_dir, season), preseason, previous_seasons(season, 1)[0],
+                        season=season)
     rules = load_rules()
     today = today_eastern()
     gaps: list[str] = []
@@ -294,6 +331,9 @@ def run(args: argparse.Namespace) -> int:
         owners = {r.roster_id: users.get(r.owner_id or "", f"roster {r.roster_id}")
                   for r in client.get_rosters_live(league_id)}
         players = client.get_players()
+        # Read lazily by the model, so filling them here, before any distribution, is enough.
+        model.birth_dates = birth_dates_by_nba_id(
+            {int(nba_id): sid for sid, nba_id in pool["nba_player_id"].items()}, players)
         mine_m = next(m for m in matchups if m.roster_id == roster.roster_id)
         theirs_m = next(m for m in matchups if m.matchup_id == mine_m.matchup_id and m.roster_id != roster.roster_id)
 
@@ -302,6 +342,13 @@ def run(args: argparse.Namespace) -> int:
         for g in games:
             status[(g.home, g.date)] = status[(g.away, g.date)] = g.status
 
+        games_cache: dict[str, list] = {}
+
+        def season_games(player_id: str) -> list:
+            if player_id not in games_cache:
+                games_cache[player_id] = client.get_player_games(player_id, season_year)
+            return games_cache[player_id]
+
         def starters_of(m: Matchup) -> list[Starter]:
             built = []
             for player_id, counted in zip(m.starters or [], m.starters_points or []):
@@ -309,7 +356,7 @@ def run(args: argparse.Namespace) -> int:
                     built.append(Starter(EMPTY_SLOT, "(empty slot)", "", 0.0, slot=Slot("(empty)", None)))
                     continue
                 scores = {g.date: score_box(box_from_sleeper_stats(g.stats), rules)
-                          for g in client.get_player_games(player_id, season_year) if g.week == week}
+                          for g in season_games(player_id) if g.week == week}
                 distribution, base = None, None
                 if player_id in pool.index:
                     try:
@@ -325,6 +372,7 @@ def run(args: argparse.Namespace) -> int:
             return built
 
         mine, theirs = starters_of(mine_m), starters_of(theirs_m)
+        roles = role_watch(mine_m.model_extra.get("players") or [], pool, model, players, season_games)
 
     # Deadlines need tip-off times; Sleeper has none, so they come from ESPN. A failure here
     # costs only the clock time, so it is a gap, not a crash.
@@ -350,7 +398,7 @@ def run(args: argparse.Namespace) -> int:
                                          pair[0].next_game or date.max, pair[0].name))
 
     my_name, their_name = owners[mine_m.roster_id], owners[theirs_m.roster_id]
-    print(render(week, my_name, their_name, mine, theirs, mine_m, theirs_m, odds, decisions, gaps))
+    print(render(week, my_name, their_name, mine, theirs, mine_m, theirs_m, odds, decisions, gaps, roles))
 
     if args.post:
         due_today = [d for d in decisions if d[0].next_game == today]
@@ -358,7 +406,7 @@ def run(args: argparse.Namespace) -> int:
             print("\nnot posted: no decision is due today")
             return 0
         shown = due_today if args.only_if_due_today else decisions
-        message = render_discord(week, their_name, mine, mine_m, theirs_m, odds, shown, gaps)
+        message = render_discord(week, their_name, mine, mine_m, theirs_m, odds, shown, gaps, roles)
         post_or_say(message)
     return 0
 

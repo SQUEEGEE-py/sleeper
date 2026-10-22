@@ -51,7 +51,7 @@ from engine.jobs.runtime import utf8_output
 from engine.model.lineup import assign_lineup, slot_position, starting_slots
 from engine.model.distributions import age_on, game_p_play
 from engine.model.lockin import ScoreDistribution, lock_threshold, weekly_value
-from engine.model.player_model import PlayerModel
+from engine.model.player_model import PlayerModel, birth_dates_by_nba_id
 
 CONFIG_PATH = Path("config/league.json")
 POOL_PATH = Path("data/board/pool.csv")
@@ -256,11 +256,19 @@ def lineup_changes(sheets: list[PlayerSheet]) -> tuple[list[str], list[str]]:
     return start, sit
 
 
+# The lineup is chosen from scratch for the whole week. Mid-week that is wrong in two ways it
+# cannot see: a locked player's slot is fixed, and games already played are not re-chosen.
+# Found 2026-10-22, when the age adjustment had it bench Lillard, locked at 49.5 the night before.
+MIDWEEK_CAVEAT = ("pre-week advice: it ignores games already played and locks -- never bench a "
+                  "locked player; mid-week, follow the nightly report")
+
+
 def render_terminal(sheets: list[PlayerSheet], week: int, gaps: list[str]) -> str:
     lines = [f"WEEK {week} LOCK SHEET -- lock a score if it is at least the number shown"]
     start, sit = lineup_changes(sheets)
     if start or sit:
         lines.append(f"LINEUP: start {', '.join(start) or '-'}; bench {', '.join(sit) or '-'}")
+        lines.append(f"  ({MIDWEEK_CAVEAT})")
     for sheet in sheets:
         role = sheet.recommended_slot or "BN"
         lines.append(
@@ -285,7 +293,8 @@ def render_html(sheets: list[PlayerSheet], week: int, week_dates: str, gaps: lis
     if start or sit:
         lineup_block = (
             "<div class=warnbox><b>Set your lineup in Sleeper.</b> Only starters can be locked. "
-            f"Start: {esc(', '.join(start) or '-')}. Bench: {esc(', '.join(sit) or '-')}.</div>"
+            f"Start: {esc(', '.join(start) or '-')}. Bench: {esc(', '.join(sit) or '-')}. "
+            f"<i>{esc(MIDWEEK_CAVEAT)}</i></div>"
         )
     cards = []
     for sheet in sheets:
@@ -385,7 +394,9 @@ def main() -> int:
 
     preseason_path = args.data_dir / f"preseason_logs_{season}.parquet"
     preseason = pd.read_parquet(preseason_path) if preseason_path.exists() else pd.DataFrame()
-    model = PlayerModel(load_logs(args.data_dir, season), preseason, previous_seasons(season, 1)[0])
+    nba_to_sleeper = {int(nba_id): sleeper_id for sleeper_id, nba_id in pool["nba_player_id"].items()}
+    model = PlayerModel(load_logs(args.data_dir, season), preseason, previous_seasons(season, 1)[0],
+                        season=season, birth_dates=birth_dates_by_nba_id(nba_to_sleeper, sleeper_players))
 
     gaps: list[str] = []
     sheets: list[PlayerSheet] = []

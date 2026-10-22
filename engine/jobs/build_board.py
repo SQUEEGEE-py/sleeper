@@ -32,7 +32,7 @@ from engine.jobs.runtime import utf8_output
 from engine.model.distributions import EmpiricalScoreDistribution, score_game_logs
 from engine.model.lineup import starting_slots
 from engine.model.lockin import season_value, weekly_value
-from engine.model.player_model import PlayerModel
+from engine.model.player_model import PlayerModel, birth_dates_by_nba_id
 from engine.model.rookies import preseason_minutes
 from engine.model.valuation import PlayerValue, build_board as rank_board
 
@@ -299,7 +299,9 @@ def main() -> int:
     }
     override_by_id = overrides_by_nba_id(overrides, name_to_id)
 
-    model = PlayerModel(logs, preseason, previous_seasons(season, 1)[0], override_by_id)
+    model = PlayerModel(logs, preseason, previous_seasons(season, 1)[0], override_by_id,
+                        season=season,
+                        birth_dates=birth_dates_by_nba_id(mapping.nba_to_sleeper, sleeper_players))
     projection = model.projection
     mean_minutes = model.mean_minutes
     if projection is not None:
@@ -483,6 +485,14 @@ def main() -> int:
     rows = rows[: args.top]
     csv_path = args.out / "board.csv"
     frame.to_csv(csv_path, index=False)
+
+    if model.unaged:
+        names = logs.drop_duplicates("nba_player_id").set_index("nba_player_id")["player_name"]
+        gaps.append("no birth date in Sleeper, so not age-adjusted: "
+                    + ", ".join(sorted(str(names.get(i, i)) for i in model.unaged)))
+    if model.age_factors:
+        factors = list(model.age_factors.values())
+        print(f"age adjustment: {len(factors)} veterans, x{min(factors):.3f} to x{max(factors):.3f}")
 
     generated = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
     config_with_name = {**config, "_league_name": "National Logan League"}

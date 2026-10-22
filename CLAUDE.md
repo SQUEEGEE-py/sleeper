@@ -49,7 +49,7 @@ advisor's whole poll is guarded (`engine/jobs/runtime.py`). The season opened Tu
 reverse-standings priority waivers, no FAAB) and chose a **cloud-first nightly job with
 Discord alerts** for step 4, which is built and running (one check left, ~2026-10-27).
 **Step 5 is done** (2026-10-22): both scoring flags are true, settled from last season's
-league. **Next is step 6** (age and role awareness).
+league. **Step 6 is done** (2026-10-22): age curve and role watch. **Next is step 7** (roster management: waivers, IR, trades).
 
 **Working agreement for phase 3:** do the steps in order and **stop after each one** for the
 user to review. Commits are `phase3: <what>`. The user asks before anything is committed or
@@ -58,7 +58,7 @@ pushed.
 Everything runnable today, in the order you would use it:
 
 ```
-uv run pytest                                             # 372 tests, none need the network
+uv run pytest                                             # 384 tests, none need the network
 uv run python -m engine.jobs.verify_league                # config vs live Sleeper; exits 1 on drift
 uv run python -m engine.jobs.ingest_history [--force]     # LOCAL ONLY: logs + schedule -> parquet
 uv run python -m engine.jobs.build_board [--top 150]      # -> data/board/{board.csv,board.html,pool.csv}
@@ -75,7 +75,7 @@ uv run python -m engine.jobs.resolve_scoring                            # flags 
 
 Per-file test counts: scoring 89, distributions 38, lockin 37, nba_stats 26, lineup 25,
 player_ids 23, draft_sim 29, lock_sheet 17, rookies 14, valuation 11, draft_live 11,
-verify_league 8, runtime 4, matchup 13, locks 9, nightly 8, alerts 5, resolve_scoring 5.
+verify_league 8, runtime 4, matchup 13, locks 9, nightly 8, alerts 5, resolve_scoring 5, aging 7, roles 6.
 
 `data/` is gitignored and regenerable. **On a fresh checkout run `ingest_history` then
 `build_board` before anything else** -- the 2026-10-16 session started with no `data/` at all.
@@ -719,11 +719,38 @@ LeBron Sat 38.7 -> 34.0, Kyrie Fri 34.8 -> 30.6); starting nine week value 482.9
    game pays 40+ and 50+ (7); a triple-double pays dd and td (7). Effect: Jokic +1.32
    fp/game (+2.58 VOR), Giddey +0.53, Doncic +0.42; 123 of 496 players move at all. Board
    and `snapshot/` rebuilt. Thursday calls unchanged (Brown 54.8, LeBron 49.4).
-6. **Age + role awareness:** year-over-year fp/game and minutes change by age band from the
-   logs, applied as a *scaling* of the distribution (like `rookies.py`), with before/after
-   values for the user's roster; a team-changer flag (Brown and LeBron to PHI, Kawhi to TOR,
-   ...) comparing current-season minutes/usage to last season once 5+ games exist. No
-   hand-entered overrides.
+6. ~~Age + role awareness~~ -- **done 2026-10-22.**
+   - **Measured as a backtest of the model, not raw year-over-year change** (raw ratios put
+     every age band below 1.0: selecting by last season's minutes is regression to the mean).
+     `PlayerModel` built from earlier seasons only, projected mean vs actual for 2024-25 and
+     2025-26, 713 players with 20+ games in both seasons:
+     `log(actual/projected)` = **−0.0176 per year of age** (se 0.0034; −0.0159 and −0.0195 in
+     the two seasons separately). Minutes effect is U-shaped (×1.53 under 12 min, ×0.87-0.89
+     at 18-30, ×0.98 over 30): role change, left to current-season data, not made a rule.
+   - **35+ do not follow the line**: predicted ×0.84 vs 25-29, measured ×0.98 (95% 0.89-1.07,
+     29 player-seasons). Role players collapsed (Conley, Lowry, Lopez, Gordon, Batum), stars
+     held (Durant, Curry, Harden, LeBron at 40). **User's choice: the line, held flat from
+     34** (×0.884 for everyone 34+).
+   - `engine/model/aging.py`: factor relative to age 27 (reshapes, does not move the league
+     level), age on 1 Feb of the season, **faded by the share of weight still from earlier
+     seasons** so it disappears as this season's games arrive. Veterans only (the rookie
+     cohort is calibrated separately); before overrides. `PlayerModel(season=, birth_dates=)`
+     switches it on (board, lock sheet, nightly); without them the model is unchanged, which
+     the backtest needs. No birth date -> unadjusted and listed, never guessed (0 today).
+   - **Effect on the user's roster (big, on paper):** the seven 34+ players ×0.884; Jokic
+     ×0.93, Brown ×0.95, Bam ×0.97, George ×1.07. VOR rank: Durant 9->26, Kawhi 13->32, LeBron
+     24->44, Lillard 22->43, Kyrie 38->75; Jokic 1->3, George 42->21. Win probability week 1
+     68% -> 54%. **Calls changed: Kawhi now LOCK at 48.5** (threshold 49.6 -> 43.9). Brown and
+     LeBron still ROLL (52.0, 43.7).
+   - **Role watch** (`engine/model/roles.py`, in `nightly`): minutes this season (Sleeper
+     `min`, cloud-safe) vs his **most recent earlier season** (Lillard and Kyrie vs 2024-25),
+     judged from 5 games, flagged at ±4 min; team change reported, not flagged by itself. Whole
+     roster in the terminal report; Discord only gets flagged players.
+   - **Found: the lock sheet's lineup ignores games played and locks.** With aging it said to
+     bench Lillard, locked at 49.5 the night before. It now prints a caveat; mid-week the
+     nightly report is the tool.
+   - Tests: aging 7, roles 6; 6 mutations fail the suite (no flat tail, no fade, age today,
+     guessed birth date, flag boundary, judged from game 1).
 7. **Roster management** (after week 1): free-agent ranker (this-week and rest-of-season
    value vs the user's lowest-value player, through `player_model`); with reverse-standings
    priority (no FAAB) a claim costs nothing later, so the question is only whether a

@@ -19,10 +19,12 @@ from __future__ import annotations
 
 import dataclasses
 from dataclasses import dataclass, field
+from datetime import date
 
 import pandas as pd
 
 from engine.ingest.player_ids import PlayerOverride
+from engine.model.aging import age_adjusted, effective_factor, previous_season_share
 from engine.model.distributions import (
     MIN_GAMES_FOR_RELIABLE_HISTORY,
     EmpiricalScoreDistribution,
@@ -63,6 +65,21 @@ def build_minutes_priors(logs: pd.DataFrame) -> dict[tuple[float, float], Empiri
     return priors
 
 
+def birth_dates_by_nba_id(nba_to_sleeper: dict[int, str], sleeper_players: dict) -> dict[int, date]:
+    """Sleeper ``birth_date`` per NBA id, for the age adjustment. Players with no or an
+    unreadable birth date are simply absent; ``PlayerModel`` then reports them as unaged."""
+    births: dict[int, date] = {}
+    for nba_id, sleeper_id in nba_to_sleeper.items():
+        player = sleeper_players.get(sleeper_id)
+        text = getattr(player, "birth_date", None)
+        try:
+            if text:
+                births[int(nba_id)] = date.fromisoformat(text)
+        except ValueError:
+            continue
+    return births
+
+
 def band_for(minutes: float) -> tuple[float, float]:
     for band in MINUTES_BANDS:
         if band[0] <= minutes < band[1]:
@@ -93,6 +110,12 @@ class PlayerModel:
     preseason: pd.DataFrame
     latest_season: str
     override_by_id: dict[int, PlayerOverride] = field(default_factory=dict)
+    # The season being played, and birth dates by NBA id: together they switch on the age
+    # adjustment (``aging.py``). Left out, the model is exactly the pre-step-6 one -- which is
+    # what the aging backtest itself needs. A player with no birth date is left unadjusted and
+    # listed in ``unaged``, never given a guessed age.
+    season: str | None = None
+    birth_dates: dict[int, date] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         self.priors = build_minutes_priors(self.logs)
@@ -110,6 +133,8 @@ class PlayerModel:
         # The rookie tables are slow (per-player availability), so they are built on first use.
         self._seasons_table: pd.DataFrame | None = None
         self._discount: float | None = None
+        self.age_factors: dict[int, float] = {}  # effective factor applied, for reports
+        self.unaged: set[int] = set()
 
     # --- who is who ---------------------------------------------------------------------------
 
@@ -153,7 +178,23 @@ class PlayerModel:
         ):
             minutes = self.projection.project(self.preseason_minutes_by_id[nba_id])
         prior = self.priors.get(band_for(minutes))
-        return self._override(nba_id, build_distribution(self.logs, nba_id, prior=prior))
+        distribution = build_distribution(self.logs, nba_id, prior=prior)
+        return self._override(nba_id, self._aged(nba_id, distribution))
+
+    def _aged(self, nba_id: int, distribution: EmpiricalScoreDistribution) -> EmpiricalScoreDistribution:
+        """The age adjustment, for veterans only: the rookie cohort is calibrated on its own.
+        Applied before an override, which is a deliberate human correction and has the last
+        word."""
+        if self.season is None:
+            return distribution
+        birth = self.birth_dates.get(nba_id)
+        if birth is None:
+            self.unaged.add(nba_id)
+            return distribution
+        share = previous_season_share(self.logs[self.logs["nba_player_id"] == nba_id], self.season)
+        factor = effective_factor(birth, self.season, share)
+        self.age_factors[nba_id] = factor
+        return age_adjusted(distribution, factor)
 
     @property
     def rookie_discount(self) -> float:
