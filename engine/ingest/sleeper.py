@@ -79,6 +79,20 @@ class Matchup(BaseModel):
     starters_points: list[float] | None = None
 
 
+class Transaction(BaseModel):
+    """One add/drop/claim/trade. Probed 2026-10-22: a waiver claim carries ``settings.seq``
+    (priority order) and no bid; ``status_updated`` (ms) is when waivers processed it -- the
+    one claim so far was processed Wed 2026-10-21 03:08 ET, just after midnight Pacific."""
+
+    model_config = ConfigDict(extra="allow")
+
+    type: str
+    status: str
+    status_updated: int | None = None
+    adds: dict[str, int] | None = None
+    drops: dict[str, int] | None = None
+
+
 class PlayerGame(BaseModel):
     """One game of a player's Sleeper stats. Keys are Sleeper's scoring keys."""
 
@@ -260,6 +274,11 @@ class SleeperClient:
         There is no lock field (probed 2026-10-21); see ``engine/model/locks.py``."""
         data = self._get_fresh(f"/league/{league_id}/matchups/{week}", f"matchups_{league_id}_{week}")
         return [Matchup.model_validate(m) for m in data]
+
+    def get_transactions_live(self, league_id: str, week: int) -> list[Transaction]:
+        """A week's transactions, never from cache: who was dropped, and so is on waivers."""
+        data = self._get_fresh(f"/league/{league_id}/transactions/{week}", f"transactions_{league_id}_{week}")
+        return [Transaction.model_validate(t) for t in data]
 
     def get_player_games(self, player_id: str, season: str) -> list[PlayerGame]:
         """Every regular-season game a player has stats for, dated, never from cache.

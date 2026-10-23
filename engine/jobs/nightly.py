@@ -30,6 +30,7 @@ Stated limits:
 from __future__ import annotations
 
 import argparse
+import ast
 import json
 import sys
 from dataclasses import dataclass, field
@@ -51,6 +52,15 @@ from engine.model.locks import LockStatus, infer_lock
 from engine.model.matchup import DEFAULT_SIMS, Decision, Odds, Slot, decide, win_probability
 from engine.model.player_model import PlayerModel, birth_dates_by_nba_id
 from engine.model.roles import MIN_GAMES, RoleCheck, role_check
+from engine.model.roster_moves import (
+    Candidate,
+    IRAlert,
+    Pickup,
+    RosterPlayer,
+    ir_alerts,
+    rank_pickups,
+    waiver_reason,
+)
 from engine.model.scoring import box_from_sleeper_stats, load_rules, score_box
 
 CONFIG_PATH = Path("config/league.json")
@@ -174,7 +184,7 @@ def deadline(starter: Starter) -> str:
 def render_discord(week: int, their_name: str, mine: list[Starter], my_matchup: Matchup,
                    their_matchup: Matchup, odds: Odds | None,
                    decisions: list[tuple[Starter, Decision]], gaps: list[str],
-                   roles: list[RoleCheck] | None = None) -> str:
+                   roles: list[RoleCheck] | None = None, moves: RosterMoves | None = None) -> str:
     """The phone version: short lines, no columns, decisions first."""
     if odds is None:
         head = f"**Week {week} vs {their_name}** -- win probability not computed (see gaps)"
@@ -197,6 +207,10 @@ def render_discord(week: int, their_name: str, mine: list[Starter], my_matchup: 
     locked = [f"{s.name} {s.lock.locked_score:g}" for s in mine if s.lock and s.lock.state == "locked"]
     if locked:
         lines += ["", "Locked: " + ", ".join(locked)]
+    if moves is not None and (moves.ir or moves.pickups):
+        priority = f" (waiver priority #{moves.waiver_position})" if moves.waiver_position else ""
+        lines += ["", f"**Roster moves**{priority}"]
+        lines += [f"- {a.text}" for a in moves.ir] + [f"- Pick up {pk.describe()}" for pk in moves.pickups]
     flagged = [r for r in roles or [] if r.flagged]
     if flagged:
         lines += ["", "Role change:"] + [f"- {r.describe()}" for r in flagged]
@@ -217,7 +231,7 @@ def decision_line(starter: Starter, decision: Decision) -> str:
 def render(week: int, my_name: str, their_name: str, mine: list[Starter], theirs: list[Starter],
            my_matchup: Matchup, their_matchup: Matchup, odds: Odds | None,
            decisions: list[tuple[Starter, Decision]], gaps: list[str],
-           roles: list[RoleCheck] | None = None) -> str:
+           roles: list[RoleCheck] | None = None, moves: RosterMoves | None = None) -> str:
     lines = [f"WEEK {week}: {my_name} vs {their_name}"]
     lines.append(f"Sleeper now: {my_matchup.points or 0:g} - {their_matchup.points or 0:g}")
     if odds is None:
@@ -238,6 +252,12 @@ def render(week: int, my_name: str, their_name: str, mine: list[Starter], theirs
     lines.append(f"\n{their_name.upper()}'S STARTERS")
     for s in theirs:
         lines.append(f"  {s.name:24} {_state(s)}")
+    if moves is not None:
+        priority = f" (you are #{moves.waiver_position} in waiver priority)" if moves.waiver_position else ""
+        lines.append(f"\nROSTER MOVES{priority}")
+        lines += [f"  IR: {a.text}" for a in moves.ir] or ["  IR: nothing to do"]
+        lines += ([f"  PICKUP: {pk.describe()}" for pk in moves.pickups]
+                  or ["  PICKUP: no free agent beats your bench by the margin"])
     if roles:
         lines.append(f"\nROLE WATCH (your roster; minutes this season vs his latest earlier season, judged from {MIN_GAMES} games)")
         lines += [f"  {'!! ' if r.flagged else '   '}{r.describe()}" for r in roles]
@@ -267,6 +287,68 @@ def _state(s: Starter) -> str:
 
 
 # --- main -----------------------------------------------------------------------------------
+
+
+@dataclass
+class RosterMoves:
+    ir: list[IRAlert]
+    pickups: list[Pickup]
+    waiver_position: int | None
+    gaps: list[str]
+
+
+def roster_moves(config: dict, roster, rosters: list, players: dict, pool: pd.DataFrame,
+                 status: dict[tuple[str, str], str], today: date, transactions: list,
+                 now: datetime) -> RosterMoves:
+    """IR alerts and free-agent pickups for the user's roster (``roster_moves.py`` has the
+    rules). Values are the board's VOR from ``pool.csv``; a bench player missing from it is a
+    gap, not a zero."""
+    extra = roster.model_extra or {}
+    reserve_ids = list(extra.get("reserve") or [])
+    roster_ids = list(roster.players or [])
+    gaps: list[str] = []
+
+    def name_of(pid: str) -> str:
+        player = players.get(pid)
+        return (player.full_name if player else None) or pid
+
+    def status_of(pid: str) -> str | None:
+        player = players.get(pid)
+        return player.injury_status if player else None
+
+    active = [RosterPlayer(pid, name_of(pid), status_of(pid)) for pid in roster_ids if pid not in reserve_ids]
+    reserve = [RosterPlayer(pid, name_of(pid), status_of(pid)) for pid in reserve_ids]
+    ir = ir_alerts(active, reserve, config["ir"]["slots"], config["ir"]["eligible_statuses"])
+
+    dropped_at: dict[str, datetime] = {}
+    for t in transactions:
+        if t.status == "complete" and t.drops and t.status_updated:
+            when = datetime.fromtimestamp(t.status_updated / 1000, timezone.utc)
+            for pid in t.drops:
+                dropped_at[pid] = max(when, dropped_at.get(pid, when))
+    started = {team for (team, day), state in status.items() if day == today.isoformat() and state != "pre_game"}
+    rostered = {pid for r in rosters for pid in (r.players or [])}
+    waivers = config["waivers"]
+    candidates = []
+    for sid, row in pool.iterrows():
+        player = players.get(sid)
+        if sid in rostered or player is None or not player.team:
+            continue
+        reason = waiver_reason(sid, player.team, dropped_at, now, waivers["clear_days"], started,
+                               waivers["after_game_start"])
+        candidates.append(Candidate(sid, str(row["name"]), player.team, tuple(ast.literal_eval(row["positions"])),
+                                    float(row["vor"]), player.injury_status, reason is not None, reason or ""))
+
+    droppable = []
+    for pid in roster_ids:
+        if pid in (roster.starters or []) or pid in reserve_ids:
+            continue
+        if pid in pool.index:
+            droppable.append((name_of(pid), float(pool.loc[pid, "vor"])))
+        else:
+            gaps.append(f"{name_of(pid)}: not in pool.csv, so not compared against free agents")
+    position = (extra.get("settings") or {}).get("waiver_position")
+    return RosterMoves(ir, rank_pickups(candidates, droppable), position, gaps)
 
 
 def role_watch(roster: list[str], pool: pd.DataFrame, model: PlayerModel, players: dict,
@@ -328,8 +410,12 @@ def run(args: argparse.Namespace) -> int:
         roster = my_roster(client, league_id, args.user)
         matchups = client.get_matchups_live(league_id, week)
         users = {u.user_id: u.display_name for u in client.get_users(league_id)}
-        owners = {r.roster_id: users.get(r.owner_id or "", f"roster {r.roster_id}")
-                  for r in client.get_rosters_live(league_id)}
+        rosters = client.get_rosters_live(league_id)
+        owners = {r.roster_id: users.get(r.owner_id or "", f"roster {r.roster_id}") for r in rosters}
+        # This week's drops, and last week's too early in a week, decide who is on waivers.
+        transactions = client.get_transactions_live(league_id, week)
+        if week > 1:
+            transactions += client.get_transactions_live(league_id, week - 1)
         players = client.get_players()
         # Read lazily by the model, so filling them here, before any distribution, is enough.
         model.birth_dates = birth_dates_by_nba_id(
@@ -373,6 +459,9 @@ def run(args: argparse.Namespace) -> int:
 
         mine, theirs = starters_of(mine_m), starters_of(theirs_m)
         roles = role_watch(mine_m.model_extra.get("players") or [], pool, model, players, season_games)
+        moves = roster_moves(config, roster, rosters, players, pool, status, today, transactions,
+                             datetime.now(timezone.utc))
+        gaps += moves.gaps
 
     # Deadlines need tip-off times; Sleeper has none, so they come from ESPN. A failure here
     # costs only the clock time, so it is a gap, not a crash.
@@ -398,7 +487,7 @@ def run(args: argparse.Namespace) -> int:
                                          pair[0].next_game or date.max, pair[0].name))
 
     my_name, their_name = owners[mine_m.roster_id], owners[theirs_m.roster_id]
-    print(render(week, my_name, their_name, mine, theirs, mine_m, theirs_m, odds, decisions, gaps, roles))
+    print(render(week, my_name, their_name, mine, theirs, mine_m, theirs_m, odds, decisions, gaps, roles, moves))
 
     if args.post:
         due_today = [d for d in decisions if d[0].next_game == today]
@@ -406,7 +495,7 @@ def run(args: argparse.Namespace) -> int:
             print("\nnot posted: no decision is due today")
             return 0
         shown = due_today if args.only_if_due_today else decisions
-        message = render_discord(week, their_name, mine, mine_m, theirs_m, odds, shown, gaps, roles)
+        message = render_discord(week, their_name, mine, mine_m, theirs_m, odds, shown, gaps, roles, moves)
         if args.reason:
             message = rerun_banner(args.reason) + "\n" + message
         post_or_say(message)

@@ -58,7 +58,7 @@ pushed.
 Everything runnable today, in the order you would use it:
 
 ```
-uv run pytest                                             # 384 tests, none need the network
+uv run pytest                                             # 400 tests, none need the network
 uv run python -m engine.jobs.verify_league                # config vs live Sleeper; exits 1 on drift
 uv run python -m engine.jobs.ingest_history [--force]     # LOCAL ONLY: logs + schedule -> parquet
 uv run python -m engine.jobs.build_board [--top 150]      # -> data/board/{board.csv,board.html,pool.csv}
@@ -75,7 +75,7 @@ uv run python -m engine.jobs.resolve_scoring                            # flags 
 
 Per-file test counts: scoring 89, distributions 38, lockin 37, nba_stats 26, lineup 25,
 player_ids 23, draft_sim 29, lock_sheet 17, rookies 14, valuation 11, draft_live 11,
-verify_league 8, runtime 4, matchup 13, locks 9, nightly 8, alerts 5, resolve_scoring 5, aging 7, roles 6.
+verify_league 8, runtime 4, matchup 13, locks 9, nightly 8, alerts 6, resolve_scoring 5, aging 7, roles 6, roster_moves 10, nightly_roster 5.
 
 `data/` is gitignored and regenerable. **On a fresh checkout run `ingest_history` then
 `build_board` before anything else** -- the 2026-10-16 session started with no `data/` at all.
@@ -757,7 +757,31 @@ LeBron Sat 38.7 -> 34.0, Kyrie Fri 34.8 -> 30.6); starting nine week value 482.9
      nightly report is the tool.
    - Tests: aging 7, roles 6; 6 mutations fail the suite (no flat tail, no fade, age today,
      guessed birth date, flag boundary, judged from game 1).
-7. **Roster management** (after week 1): free-agent ranker (this-week and rest-of-season
+7. **Roster management -- in progress.** **Done 2026-10-22: IR alerts and pickups**, in
+   `nightly` (terminal: always; Discord: only when there is something to do):
+   - `engine/model/roster_moves.py` (pure). Sleeper `injury_status` values in use (probed):
+     `Out`, `GTD`, `DTD`, `IR`. Out -> OUT (eligible); GTD/DTD not; Sleeper's own `IR`
+     treated as eligible but flagged "assumed"; `Sus`/`Suspended`/`DNR` mapped with no live
+     example; **anything else is reported as unrecognised**. Alerts: stash an eligible player
+     while a slot is free, "both slots full", and **activate** a reserve player who no longer
+     qualifies (Sleeper restricts moves while one sits there). A roster's `players` includes
+     its `reserve`; active = players minus reserve.
+   - Pickups: free agents (on an NBA team, on no roster) whose board VOR beats the user's
+     weakest **bench** player by `PICKUP_MIN_GAIN` = 2.0 per week; OUT/IR free agents skipped.
+     **Waivers inferred, not read**: dropped within `clear_days` (from transactions), or his
+     game today has tipped (`after_game_start`). The one processed claim so far ran Wed
+     03:08 ET (just after midnight PT), so the 07:43 UTC report lands after waivers clear.
+     Shows the user's `waiver_position`.
+   - First live run (Thu 10/22): IR nothing to do; you are #7 in priority; five free agents
+     beat Vucevic (-3.6 VOR after aging) by 3-5/week: Jeremiah Fears, Jabari Smith Jr. (one
+     of the 32 the suffix bug had hidden), Kyle Filipowski, Bennett Stirtz, Ace Bailey. All
+     verified unrostered.
+   - Tests: roster_moves 10, nightly_roster 5; mutations (rostered player offered, IR player
+     counted active) fail the suite -- the second only after adding a still-out IR case.
+   **Still to do in step 7:** trade finder, week-19 deadline countdown, sell-old-before-
+   playoffs flag, rookie blend.
+
+   Original plan: free-agent ranker (this-week and rest-of-season
    value vs the user's lowest-value player, through `player_model`); with reverse-standings
    priority (no FAAB) a claim costs nothing later, so the question is only whether a
    higher-priority team will take the player first, else wait a day for free agency; IR alerts when a
