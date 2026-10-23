@@ -49,7 +49,7 @@ advisor's whole poll is guarded (`engine/jobs/runtime.py`). The season opened Tu
 reverse-standings priority waivers, no FAAB) and chose a **cloud-first nightly job with
 Discord alerts** for step 4, which is built and running (one check left, ~2026-10-27).
 **Step 5 is done** (2026-10-22): both scoring flags are true, settled from last season's
-league. **Step 6 is done** (2026-10-22): age curve and role watch. **Next is step 7** (roster management: waivers, IR, trades).
+league. **Step 6 is done** (2026-10-22): age curve and role watch. **Step 7 is done** (2026-10-22): IR alerts, pickups, trade finder, deadline countdown. **All seven phase 3 steps are done**; what remains is the end-of-plan cleanup (README, docs/SPEC.md) and the follow-ups listed under step 7.
 
 **Working agreement for phase 3:** do the steps in order and **stop after each one** for the
 user to review. Commits are `phase3: <what>`. The user asks before anything is committed or
@@ -58,7 +58,7 @@ pushed.
 Everything runnable today, in the order you would use it:
 
 ```
-uv run pytest                                             # 400 tests, none need the network
+uv run pytest                                             # 409 tests, none need the network
 uv run python -m engine.jobs.verify_league                # config vs live Sleeper; exits 1 on drift
 uv run python -m engine.jobs.ingest_history [--force]     # LOCAL ONLY: logs + schedule -> parquet
 uv run python -m engine.jobs.build_board [--top 150]      # -> data/board/{board.csv,board.html,pool.csv}
@@ -75,7 +75,7 @@ uv run python -m engine.jobs.resolve_scoring                            # flags 
 
 Per-file test counts: scoring 89, distributions 38, lockin 37, nba_stats 26, lineup 25,
 player_ids 23, draft_sim 29, lock_sheet 17, rookies 14, valuation 11, draft_live 11,
-verify_league 8, runtime 4, matchup 13, locks 9, nightly 8, alerts 6, resolve_scoring 5, aging 7, roles 6, roster_moves 10, nightly_roster 5.
+verify_league 8, runtime 4, matchup 13, locks 9, nightly 8, alerts 6, resolve_scoring 5, aging 7, roles 6, roster_moves 10, nightly_roster 6, trades 8.
 
 `data/` is gitignored and regenerable. **On a fresh checkout run `ingest_history` then
 `build_board` before anything else** -- the 2026-10-16 session started with no `data/` at all.
@@ -778,8 +778,38 @@ LeBron Sat 38.7 -> 34.0, Kyrie Fri 34.8 -> 30.6); starting nine week value 482.9
      verified unrostered.
    - Tests: roster_moves 10, nightly_roster 5; mutations (rostered player offered, IR player
      counted active) fail the suite -- the second only after adding a still-out IR case.
-   **Still to do in step 7:** trade finder, week-19 deadline countdown, sell-old-before-
-   playoffs flag, rookie blend.
+   **Also done 2026-10-22: trade finder and deadline countdown** (`engine/model/trades.py`,
+   in `nightly`):
+   - Team strength = best starting lineup (exact assignment) valued by `season_value`. A trade
+     of up to 2 players each way is listed only if it raises **both** lineups by `MIN_GAIN` =
+     1.0/week; each side shows Sleeper's rank (`search_rank`, the market view the partner
+     sees). Throw-ins that change nothing are dropped (Kawhi + LeBron for Haliburton was also
+     listed with Jarrett Allen added, same gains). All 7 partners searched in ~4 s.
+   - First live run: user has the best lineup by our model even after aging (453.6/week;
+     gilbobo 444.9, ChickenJoe2107 443.3), so mutual trades are rare and small (+1.3-1.7/week):
+     Kawhi + LeBron for Haliburton (tristantro), Kyrie + Bey for Jaren Jackson Jr.
+     (tristantro), Kyrie + LeBron for Harden (cyapp1), Kawhi + Bey for Michael Porter Jr.
+     (cyapp1). Limits (docstring): lineup value only, no bench-depth value; our values for both
+     sides.
+   - Deadline = last game day of `trade_deadline_week` in Sleeper's schedule: **Sun
+     2027-02-28**. Terminal shows trades every run; Discord only on Mondays, and daily in the
+     deadline's last 2 weeks.
+   - **The "sell an old player before the week-22 playoffs" flag was measured and dropped.**
+     Fantasy playoffs are weeks 22-24 = Mar 15 - Apr 4. Rotation players at end of February,
+     2023-26 (661 player-seasons): everyone plays less in that window (0.85-0.86 of team games
+     before March -> 0.72-0.79), and **34+ drop the least** (ratio 0.925 vs 0.84-0.86 for every
+     younger band); "sat the whole window" is ~10-11% in every band. Durant, LeBron, DeRozan
+     played 90-100% of last season's window. Age decline is already in `aging.py`.
+     **Worth wiring later: the ~15% league-wide late-season availability drop** lowers lock
+     thresholds in weeks 22-24 for everyone.
+   - Tests: trades 8 (+1 in nightly_roster); mutations (one-sided trades allowed, throw-ins
+     kept) fail the suite.
+   - **Rookie blend: skipped (user's choice, 2026-10-22).** It only applies until a rookie has
+     regular-season games in the snapshot (weeks), and the measured gain was small (r 0.33 ->
+     0.44, MAE 6.9 -> 6.8). A weekly snapshot refresh brings rookies' real games in sooner.
+   **Step 7 is done.** Open follow-ups from it: the late-season availability drop for weeks
+   22-24 (above), and rebuilding current-season logs from Sleeper in the cloud so the
+   snapshot refresh stops being a laptop chore.
 
    Original plan: free-agent ranker (this-week and rest-of-season
    value vs the user's lowest-value player, through `player_model`); with reverse-standings

@@ -52,6 +52,9 @@ from engine.model.locks import LockStatus, infer_lock
 from engine.model.matchup import DEFAULT_SIMS, Decision, Odds, Slot, decide, win_probability
 from engine.model.player_model import PlayerModel, birth_dates_by_nba_id
 from engine.model.roles import MIN_GAMES, RoleCheck, role_check
+from engine.model.lineup import starting_slots
+from engine.model.trades import Deadline, Trade, TradePlayer, find_trades, post_trades_today
+from engine.model.trades import deadline as trade_deadline
 from engine.model.roster_moves import (
     Candidate,
     IRAlert,
@@ -184,7 +187,8 @@ def deadline(starter: Starter) -> str:
 def render_discord(week: int, their_name: str, mine: list[Starter], my_matchup: Matchup,
                    their_matchup: Matchup, odds: Odds | None,
                    decisions: list[tuple[Starter, Decision]], gaps: list[str],
-                   roles: list[RoleCheck] | None = None, moves: RosterMoves | None = None) -> str:
+                   roles: list[RoleCheck] | None = None, moves: RosterMoves | None = None,
+                   trades: TradeReport | None = None) -> str:
     """The phone version: short lines, no columns, decisions first."""
     if odds is None:
         head = f"**Week {week} vs {their_name}** -- win probability not computed (see gaps)"
@@ -214,6 +218,9 @@ def render_discord(week: int, their_name: str, mine: list[Starter], my_matchup: 
     flagged = [r for r in roles or [] if r.flagged]
     if flagged:
         lines += ["", "Role change:"] + [f"- {r.describe()}" for r in flagged]
+    if trades is not None and trades.post:
+        lines += ["", f"**Trade ideas** ({trades.deadline.describe()})"]
+        lines += [f"- {t.describe()}" for t in trades.trades] or ["- none that improve both lineups"]
     if gaps:
         lines += ["", "Gaps:"] + [f"- {gap}" for gap in gaps]
     return "\n".join(lines)
@@ -231,7 +238,8 @@ def decision_line(starter: Starter, decision: Decision) -> str:
 def render(week: int, my_name: str, their_name: str, mine: list[Starter], theirs: list[Starter],
            my_matchup: Matchup, their_matchup: Matchup, odds: Odds | None,
            decisions: list[tuple[Starter, Decision]], gaps: list[str],
-           roles: list[RoleCheck] | None = None, moves: RosterMoves | None = None) -> str:
+           roles: list[RoleCheck] | None = None, moves: RosterMoves | None = None,
+           trades: TradeReport | None = None) -> str:
     lines = [f"WEEK {week}: {my_name} vs {their_name}"]
     lines.append(f"Sleeper now: {my_matchup.points or 0:g} - {their_matchup.points or 0:g}")
     if odds is None:
@@ -258,6 +266,10 @@ def render(week: int, my_name: str, their_name: str, mine: list[Starter], theirs
         lines += [f"  IR: {a.text}" for a in moves.ir] or ["  IR: nothing to do"]
         lines += ([f"  PICKUP: {pk.describe()}" for pk in moves.pickups]
                   or ["  PICKUP: no free agent beats your bench by the margin"])
+    if trades is not None:
+        lines.append(f"\nTRADES ({trades.deadline.describe()}; both lineups must improve, our model;"
+                     " Slpr = Sleeper's rank, the market view)")
+        lines += [f"  {t.describe()}" for t in trades.trades] or ["  none that improve both lineups"]
     if roles:
         lines.append(f"\nROLE WATCH (your roster; minutes this season vs his latest earlier season, judged from {MIN_GAMES} games)")
         lines += [f"  {'!! ' if r.flagged else '   '}{r.describe()}" for r in roles]
@@ -349,6 +361,43 @@ def roster_moves(config: dict, roster, rosters: list, players: dict, pool: pd.Da
             gaps.append(f"{name_of(pid)}: not in pool.csv, so not compared against free agents")
     position = (extra.get("settings") or {}).get("waiver_position")
     return RosterMoves(ir, rank_pickups(candidates, droppable), position, gaps)
+
+
+@dataclass
+class TradeReport:
+    deadline: Deadline
+    trades: list[Trade]
+    post: bool  # include in today's Discord post
+
+
+def trade_report(config: dict, my_roster_id: int, rosters: list, owners: dict[int, str],
+                 pool: pd.DataFrame, slots: list[str], games: list[ScheduledGame], week: int,
+                 today: date) -> TradeReport:
+    """Trades improving both lineups (``trades.py``), and the deadline countdown. Players in
+    IR are left out of both sides; a player missing from ``pool.csv`` is left out too, and
+    ``build_board``'s own gap list already reports him."""
+    deadline_week = config["trade_deadline_week"]
+    days = [g.date for g in games if g.week == deadline_week]
+    last_day = date.fromisoformat(max(days)) if days else date.max
+    dl = trade_deadline(deadline_week, week, last_day)
+    if dl.passed:
+        return TradeReport(dl, [], False)
+
+    def side(r) -> list[TradePlayer]:
+        reserve = set((r.model_extra or {}).get("reserve") or [])
+        out = []
+        for pid in r.players or []:
+            if pid in reserve or pid not in pool.index:
+                continue
+            row = pool.loc[pid]
+            rank = None if pd.isna(row["sleeper_rank"]) else float(row["sleeper_rank"])
+            out.append(TradePlayer(pid, str(row["name"]), tuple(ast.literal_eval(row["positions"])),
+                                   float(row["season_value"]), rank))
+        return out
+
+    mine = next(side(r) for r in rosters if r.roster_id == my_roster_id)
+    partners = {owners[r.roster_id]: side(r) for r in rosters if r.roster_id != my_roster_id}
+    return TradeReport(dl, find_trades(mine, partners, slots), post_trades_today(dl, today))
 
 
 def role_watch(roster: list[str], pool: pd.DataFrame, model: PlayerModel, players: dict,
@@ -462,6 +511,8 @@ def run(args: argparse.Namespace) -> int:
         moves = roster_moves(config, roster, rosters, players, pool, status, today, transactions,
                              datetime.now(timezone.utc))
         gaps += moves.gaps
+        trades = trade_report(config, roster.roster_id, rosters, owners, pool,
+                              starting_slots(config["roster_positions"]), games, week, today)
 
     # Deadlines need tip-off times; Sleeper has none, so they come from ESPN. A failure here
     # costs only the clock time, so it is a gap, not a crash.
@@ -487,7 +538,7 @@ def run(args: argparse.Namespace) -> int:
                                          pair[0].next_game or date.max, pair[0].name))
 
     my_name, their_name = owners[mine_m.roster_id], owners[theirs_m.roster_id]
-    print(render(week, my_name, their_name, mine, theirs, mine_m, theirs_m, odds, decisions, gaps, roles, moves))
+    print(render(week, my_name, their_name, mine, theirs, mine_m, theirs_m, odds, decisions, gaps, roles, moves, trades))
 
     if args.post:
         due_today = [d for d in decisions if d[0].next_game == today]
@@ -495,7 +546,7 @@ def run(args: argparse.Namespace) -> int:
             print("\nnot posted: no decision is due today")
             return 0
         shown = due_today if args.only_if_due_today else decisions
-        message = render_discord(week, their_name, mine, mine_m, theirs_m, odds, shown, gaps, roles, moves)
+        message = render_discord(week, their_name, mine, mine_m, theirs_m, odds, shown, gaps, roles, moves, trades)
         if args.reason:
             message = rerun_banner(args.reason) + "\n" + message
         post_or_say(message)

@@ -82,3 +82,23 @@ def test_a_bench_player_missing_from_the_pool_is_a_gap() -> None:
     players = {pid: player(pid) for pid in POOL.index} | {"ghost": player("ghost")}
     moves = run(mine, players)
     assert moves.pickups == [] and any("Pghost" in gap for gap in moves.gaps)
+
+
+def test_trade_report_leaves_ir_players_out_and_stops_after_the_deadline() -> None:
+    from engine.ingest.sleeper import ScheduledGame
+    from engine.jobs.nightly import trade_report
+    pool = pd.DataFrame([
+        {"sleeper_id": sid, "name": sid, "positions": pos, "season_value": v, "sleeper_rank": 50.0}
+        for sid, pos, v in [("g", "('PG',)", 40), ("f1", "('SF',)", 45), ("f2", "('PF',)", 44),
+                            ("c", "('C',)", 30), ("star", "('C',)", 60), ("G", "('PG',)", 40),
+                            ("F", "('SF',)", 31), ("C1", "('C',)", 43), ("C2", "('C',)", 42)]
+    ]).set_index("sleeper_id")
+    slots = ["G#1", "F#1", "C#1"]
+    games = [ScheduledGame(game_id="x", date="2027-02-28", week=19, status="pre_game", home="PHI", away="BOS")]
+    mine = roster(4, ["g", "f1", "f2", "c", "star"], ["g"], reserve=["star"])
+    theirs = roster(1, ["G", "F", "C1", "C2"], ["G"])
+    report = trade_report(CONFIG, 4, [mine, theirs], {4: "me", 1: "rival"}, pool, slots, games, 1, TODAY)
+    assert report.trades and all("star" not in {p.player_id for p in t.give} for t in report.trades)
+    assert report.deadline.last_day == date(2027, 2, 28) and report.deadline.weeks_left == 19
+    after = trade_report(CONFIG, 4, [mine, theirs], {4: "me", 1: "rival"}, pool, slots, games, 20, TODAY)
+    assert after.deadline.passed and after.trades == [] and not after.post
