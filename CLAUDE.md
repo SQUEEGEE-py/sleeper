@@ -58,7 +58,7 @@ pushed.
 Everything runnable today, in the order you would use it:
 
 ```
-uv run pytest                                             # 409 tests, none need the network
+uv run pytest                                             # 411 tests, none need the network
 uv run python -m engine.jobs.verify_league                # config vs live Sleeper; exits 1 on drift
 uv run python -m engine.jobs.ingest_history [--force]     # LOCAL ONLY: logs + schedule -> parquet
 uv run python -m engine.jobs.build_board [--top 150]      # -> data/board/{board.csv,board.html,pool.csv}
@@ -75,7 +75,7 @@ uv run python -m engine.jobs.resolve_scoring                            # flags 
 
 Per-file test counts: scoring 89, distributions 38, lockin 37, nba_stats 26, lineup 25,
 player_ids 23, draft_sim 29, lock_sheet 17, rookies 14, valuation 11, draft_live 11,
-verify_league 8, runtime 4, matchup 13, locks 9, nightly 8, alerts 6, resolve_scoring 5, aging 7, roles 6, roster_moves 10, nightly_roster 6, trades 8.
+verify_league 8, runtime 4, matchup 13, locks 10, nightly 9, alerts 6, resolve_scoring 5, aging 7, roles 6, roster_moves 10, nightly_roster 6, trades 8.
 
 `data/` is gitignored and regenerable. **On a fresh checkout run `ingest_history` then
 `build_board` before anything else** -- the 2026-10-16 session started with no `data/` at all.
@@ -679,10 +679,21 @@ LeBron Sat 38.7 -> 34.0, Kyrie Fri 34.8 -> 30.6); starting nine week value 482.9
      stats.nba.com logs) and its own `dd`/`bonus_pt_*` keys. `scoring.box_from_sleeper_stats`
      converts; Brown 43.5 and LeBron 38.0 on 10/20 rescore to Sleeper's exact totals.
    - **No lock field in the public API** (matchups, rosters, roster settings, league all
-     checked). `locks.infer_lock` infers it from `starters_points`: counting an earlier game
-     = locked on it; counting the latest = "open" (unlocked or locked tonight -- cannot be told
-     apart until his next game); matching nothing = a visible gap. **No manual confirmation**:
-     a cloud job cannot take input, so advice is phrased "only if you have NOT locked him".
+     checked). `locks.infer_lock` infers it from `starters_points`: counting the latest = "open"
+     (unlocked or locked tonight -- cannot be told apart until his next game); matching nothing =
+     a visible gap. **No manual confirmation**: a cloud job cannot take input, so advice is
+     phrased "only if you have NOT locked him".
+   - **Corrected 2026-10-22: "counting an earlier game" is NOT proof of a lock after a game
+     ends.** After the 76ers' Thursday game every 76ers starter in the league (LeBron, Brown,
+     Embiid, Maxey; three rosters) still counted Tuesday's score; the user had locked neither of
+     his, and LeBron's moved to Thursday's 43 within about an hour -- **Sleeper refreshes a
+     starter's counted score some time after his game ends** (the bench player showed Thursday
+     at once). Now: during a live game, stuck on an earlier game = **locked** (unlocked
+     starters follow the live score, e.g. Jalen Williams); after a game, it is **"unclear"**.
+     The user's own unclear player is advised as not locked, from his latest game (gap note
+     says so); an opponent's is treated as banked at Sleeper's number. The bad rule had made
+     the report call Brown and LeBron locked and drop their Saturday decisions.
+     Week-1 ground truth (user): locked Durant 51, Lillard 49.5, Kawhi 48.5; not Brown, LeBron.
    - **`matchup.py`**: simulates both lineups through the week (threshold policy, per-game
      B2B `p_play`, forced final game, 0 if he sits), common random numbers per slot, and
      `decide` = LOCK vs ROLL by chance of winning the week; falls back to the expected-points

@@ -2,10 +2,17 @@
 
 Probed 2026-10-21 (rule 6): Sleeper's public API has **no lock field** -- not in matchups,
 rosters, roster settings or the league. What it has is ``starters_points``, the score each slot
-currently counts. Unlocked, that is his latest game (0 if he sat); locked, it stays at the
-locked game. So:
+currently counts. So:
 
-* counted == an **earlier** game's score, not the latest  ->  locked on that game;
+* **during** his team's game: an unlocked starter's counted score follows the live game (Jalen
+  Williams, 10/22), so counted == an earlier finished game means **locked** on it;
+* **after** a game: counted == an **earlier** game's score is **"unclear"**, not locked.
+  Corrected 2026-10-22: after the 76ers' Thursday game every 76ers *starter* in the league
+  still counted Tuesday's score -- LeBron 38 (Thu 43), Brown 43.5 (Thu 41), Embiid 41.5 (Thu
+  43.5), Maxey 56 (Thu 58), on three different rosters -- and the user confirmed he had locked
+  neither of his. The one 76ers bench player counted Thursday's. So either Sleeper refreshes
+  starters' counted scores after a delay, or it holds the earlier game for another reason;
+  both look exactly like a lock. The caller decides what "unclear" means for its side;
 * counted == the latest game  ->  "open": unlocked, *or* locked on that very game. The two are
   indistinguishable until his next game is played. For the user's own players the advice is
   therefore phrased "if you have not locked him"; for the opponent the simulation treats the
@@ -25,7 +32,7 @@ from datetime import date
 from typing import Literal, Sequence
 
 MATCH_TOLERANCE = 0.05  # scores are in half points; this only absorbs float noise
-LockState = Literal["no_game_yet", "open", "locked", "unexplained"]
+LockState = Literal["no_game_yet", "open", "locked", "unclear", "unexplained"]
 
 
 @dataclass(frozen=True)
@@ -67,6 +74,9 @@ def infer_lock(
     earlier = [(day, score) for day, score in completed[:-1] if matches(score)]
     if earlier:
         day, score = earlier[-1]
-        return LockStatus("locked", day, score)
+        return LockStatus("unclear", day, score,
+                          note=f"Sleeper still shows {day:%a}'s {score:g} although {latest_day:%a}'s "
+                               f"{latest_score:g} has finished: locked on {day:%a}, or Sleeper has not "
+                               "caught up -- the public API cannot tell")
     scores = ", ".join(f"{day:%a} {score:g}" for day, score in completed)
     return LockStatus("unexplained", note=f"Sleeper counts {counted:g}; our rescoring has {scores}")

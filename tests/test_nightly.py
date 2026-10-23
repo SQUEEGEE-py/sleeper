@@ -40,9 +40,25 @@ def test_open_decision_after_one_game() -> None:
     assert s.slot.remaining_p_play == (0.9, 0.9, 0.9 * 0.901)
 
 
-def test_locked_on_an_earlier_game() -> None:
+def test_an_earlier_game_shown_after_a_newer_one_is_unclear() -> None:
+    # Brown on 10/22: Sleeper still showed Tue 43.5 after Thu 41 finished, and he was not
+    # locked. For the user's own player: assume not locked, decide on Thursday's score.
     games = with_status(**{"2026-10-22": "complete"})
-    s = build(games, 43.5, {"2026-10-20": 43.5, "2026-10-22": 30.0})
+    s = build(games, 43.5, {"2026-10-20": 43.5, "2026-10-22": 41.0})
+    assert s.lock.state == "unclear" and s.slot.pending == 41.0 and s.slot.decision_open
+    assert "assumes you have not locked him" in s.gap
+    # For the opponent, Sleeper's number is treated as banked.
+    status = {}
+    for g in games:
+        status[(g.home, g.date)] = status[(g.away, g.date)] = g.status
+    theirs = build_starter("1711", 43.5, BROWN, schedule_frame(games), status,
+                           {"2026-10-20": 43.5, "2026-10-22": 41.0}, 1, N45, 0.9, mine=False)
+    assert theirs.slot.locked == 43.5 and not theirs.slot.decision_open
+
+
+def test_a_real_lock_is_seen_during_a_live_game() -> None:
+    games = with_status(**{"2026-10-22": "in_game"})
+    s = build(games, 43.5, {"2026-10-20": 43.5, "2026-10-22": 12.0})
     assert s.lock.state == "locked" and s.slot.locked == 43.5 and not s.slot.decision_open
 
 

@@ -123,7 +123,7 @@ class Starter:
 def build_starter(
     player_id: str, counted: float, player: Player | None, schedule: pd.DataFrame,
     status: dict[tuple[str, str], str], scores_by_date: dict[str, float], week: int,
-    distribution, base_p_play: float | None,
+    distribution, base_p_play: float | None, mine: bool = True,
 ) -> Starter:
     """Lock status and simulation slot for one starter. ``distribution`` is None when the
     player has no model; that is a gap only if he still has games to simulate."""
@@ -156,7 +156,14 @@ def build_starter(
             starter.gap = "no birth date: back-to-back nights not priced"
 
     lock = starter.lock
-    if lock.state == "locked":
+    if lock.state == "unclear" and mine:
+        # Sleeper still shows an earlier game: locked, or not caught up (locks.py). For the
+        # user's own player assume NOT locked -- he knows if he did, and the advice says so --
+        # and work from his latest finished game, the one a lock now would bank.
+        starter.gap = f"{lock.note}; advice below assumes you have not locked him"
+        starter.slot = Slot(name, distribution, remaining, pending=starter.completed[-1][1])
+    elif lock.state in ("locked", "unclear"):
+        # The opponent: Sleeper's number is the best there is; treat it as banked.
         starter.slot = Slot(name, distribution, remaining, locked=lock.locked_score)
     elif lock.state == "no_game_yet" or (lock.state == "open" and starter.in_progress):
         starter.slot = Slot(name, distribution, remaining)
@@ -289,6 +296,8 @@ def _state(s: Starter) -> str:
         state = s.gap
     elif lock.state == "locked":
         state = f"LOCKED {lock.locked_score:g} ({lock.locked_on:%a})"
+    elif lock.state == "unclear":
+        state = f"Sleeper shows {lock.locked_score:g} ({lock.locked_on:%a}) -- locked?"
     elif s.in_progress and lock.state in ("no_game_yet", "open"):
         state = f"IN GAME, live {s.counted:g}"
     elif lock.state == "no_game_yet":
@@ -500,7 +509,8 @@ def run(args: argparse.Namespace) -> int:
                     except KeyError:
                         pass
                 starter = build_starter(player_id, float(counted), players.get(player_id), schedule,
-                                        status, scores, week, distribution, base)
+                                        status, scores, week, distribution, base,
+                                        mine=m.roster_id == roster.roster_id)
                 if starter.gap:
                     gaps.append(f"{owners[m.roster_id]}: {starter.name}: {starter.gap}")
                 built.append(starter)

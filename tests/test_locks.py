@@ -22,14 +22,24 @@ def test_counting_the_latest_game_is_open_not_locked() -> None:
     assert infer_lock([(TUE, 43.5), (THU, 30.0)], 30.0).state == "open"
 
 
-def test_counting_an_earlier_game_means_locked_on_it() -> None:
-    status = infer_lock([(TUE, 43.5), (THU, 30.0), (SAT, 51.0)], 43.5)
-    assert (status.state, status.locked_on, status.locked_score) == ("locked", TUE, 43.5)
+def test_counting_an_earlier_game_after_a_newer_one_finished_is_unclear_not_locked() -> None:
+    # Real case 2026-10-22: LeBron counted Tue 38 after Thu 43 finished, and he was NOT
+    # locked; every 76ers starter in the league looked the same.
+    status = infer_lock([(TUE, 38.0), (THU, 43.0)], 38.0)
+    assert (status.state, status.locked_on, status.locked_score) == ("unclear", TUE, 38.0)
+    assert "cannot tell" in status.note and "Thu's 43" in status.note
+
+
+def test_during_a_live_game_an_earlier_score_is_a_real_lock() -> None:
+    # Unlocked starters follow the live game (Jalen Williams); one stuck on an earlier game
+    # while his team plays is locked.
+    assert infer_lock([(TUE, 63.5)], 63.5, game_in_progress=True).state == "locked"
+    assert infer_lock([(TUE, 28.5)], 19.0, game_in_progress=True).state == "open"
 
 
 def test_a_dnp_counts_as_zero() -> None:
     assert infer_lock([(TUE, 43.5), (THU, 0.0)], 0.0).state == "open"
-    assert infer_lock([(TUE, 43.5), (THU, 0.0)], 43.5).state == "locked"
+    assert infer_lock([(TUE, 43.5), (THU, 0.0)], 43.5).state == "unclear"
 
 
 def test_a_score_matching_no_game_is_a_gap_not_a_guess() -> None:
@@ -44,7 +54,7 @@ def test_game_in_progress() -> None:
 
 def test_equal_scores_take_the_latest_earlier_match() -> None:
     status = infer_lock([(TUE, 30.0), (THU, 30.0), (SAT, 20.0)], 30.0)
-    assert status.state == "locked" and status.locked_on == THU
+    assert status.state == "unclear" and status.locked_on == THU
 
 
 def test_sleeper_box_lines_rescore_to_sleepers_own_totals() -> None:
