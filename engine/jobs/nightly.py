@@ -49,7 +49,7 @@ from engine.jobs.discord import WEBHOOK_ENV, post, webhook_url
 from engine.jobs.lock_sheet import GameSlot, games_p_play, my_roster, parse_birth_date, team_week_games
 from engine.jobs.runtime import log_exception, utf8_output
 from engine.model.locks import LockStatus, infer_lock
-from engine.model.matchup import DEFAULT_SIMS, Decision, Odds, Slot, decide, win_probability
+from engine.model.matchup import DEFAULT_SIMS, Decision, Odds, Slot, decide, policy_lock, win_probability
 from engine.model.player_model import PlayerModel, birth_dates_by_nba_id
 from engine.model.roles import MIN_GAMES, RoleCheck, role_check
 from engine.model.lineup import starting_slots
@@ -173,6 +173,26 @@ def build_starter(
         starter.lock = LockStatus("locked", None, reported_lock, note="reported by you")
         starter.gap = ""
         starter.slot = Slot(name, distribution, remaining, locked=reported_lock)
+        return starter
+    if not mine and distribution is not None and starter.completed:
+        # The opponent's locks are never visible (locks.py). The user's assumption (2026-10-25):
+        # he locks optimally -- replay his finished games through the same thresholds.
+        birth = parse_birth_date(player.birth_date if player else None)
+        week_p = games_p_play(base_p_play, starter.games, birth)
+        scores = [score for _, score in starter.completed]
+        locked_at = policy_lock(distribution, scores, week_p)
+        if locked_at is not None:
+            day = next(d for d, s in starter.completed if s == locked_at)
+            starter.lock = LockStatus("locked", day, locked_at, note="assumed: locks optimally")
+            starter.slot = Slot(name, distribution, remaining, locked=locked_at)
+        elif starter.in_progress or not starter.upcoming:
+            # Mid-game, the earlier decision is gone; with no games left, the last one counts.
+            final = None if starter.upcoming else scores[-1]
+            starter.lock = LockStatus("open", note="assumed: locks optimally; not locked yet")
+            starter.slot = Slot(name, distribution, remaining, pending=final)
+        else:
+            starter.lock = LockStatus("open", note="assumed: locks optimally; not locked yet")
+            starter.slot = Slot(name, distribution, remaining, pending=scores[-1])
         return starter
     lock = starter.lock
     if lock.state == "unclear" and mine:

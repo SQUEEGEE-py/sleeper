@@ -126,3 +126,14 @@ def test_a_call_that_cannot_change_the_result_keeps_the_ev_call() -> None:
 def test_decide_needs_an_open_decision() -> None:
     with pytest.raises(ValueError, match="no open decision"):
         decide([locked("a", 40.0)], [locked("b", 40.0)], 0)
+
+
+def test_policy_lock_replays_the_thresholds() -> None:
+    # normal(45, 10) over 3 games: lock game 1 at 48.99+, game 2 at 45+, game 3 counts anyway.
+    from engine.model.matchup import policy_lock
+    week = (1.0, 1.0, 1.0)
+    assert policy_lock(N45, [50.0], week) == 50.0
+    assert policy_lock(N45, [47.0, 46.0], week) == 46.0
+    assert policy_lock(N45, [40.0, 44.0], week) is None      # still waiting for game 3
+    assert policy_lock(N45, [40.0, 44.0, 30.0], week) is None  # last game: it just counts
+    assert policy_lock(N45, [0.0], week) is None               # a game he sat is never locked

@@ -58,7 +58,7 @@ pushed.
 Everything runnable today, in the order you would use it:
 
 ```
-uv run pytest                                             # 412 tests, none need the network
+uv run pytest                                             # 413 tests, none need the network
 uv run python -m engine.jobs.verify_league                # config vs live Sleeper; exits 1 on drift
 uv run python -m engine.jobs.ingest_history [--force]     # LOCAL ONLY: logs + schedule -> parquet
 uv run python -m engine.jobs.build_board [--top 150]      # -> data/board/{board.csv,board.html,pool.csv}
@@ -75,7 +75,7 @@ uv run python -m engine.jobs.resolve_scoring                            # flags 
 
 Per-file test counts: scoring 89, distributions 38, lockin 37, nba_stats 26, lineup 25,
 player_ids 23, draft_sim 29, lock_sheet 17, rookies 14, valuation 11, draft_live 11,
-verify_league 8, runtime 4, matchup 13, locks 10, nightly 10, alerts 6, resolve_scoring 5, aging 7, roles 6, roster_moves 10, nightly_roster 6, trades 8.
+verify_league 8, runtime 4, matchup 14, locks 10, nightly 10, alerts 6, resolve_scoring 5, aging 7, roles 6, roster_moves 10, nightly_roster 6, trades 8.
 
 `data/` is gitignored and regenerable. **On a fresh checkout run `ingest_history` then
 `build_board` before anything else** -- the 2026-10-16 session started with no `data/` at all.
@@ -703,9 +703,15 @@ LeBron Sat 38.7 -> 34.0, Kyrie Fri 34.8 -> 30.6); starting nine week value 482.9
      returns "locked"; **locks come only from the user, in `state/locks.json`** (Sleeper player
      id -> score, for one week; another week's file counts for nothing). When the user reports
      a lock, update it and push: the `state/**` path reruns the advisor. Opponents' locks are
-     unknowable; their "unclear" slots are treated as banked at Sleeper's number, the rest by
-     the threshold policy. With the four reported locks, week 1 win probability on Fri night
-     was 53%, not the 33% the display-based report gave.
+     unknowable. With the four reported locks, week 1 win probability on Fri night was 53%,
+     not the 33% the display-based report gave.
+   - **Opponent assumed to lock optimally (user's choice, 2026-10-25).** `matchup.policy_lock`
+     replays each opponent starter's finished games through the expected-value thresholds
+     (per-game `p_play` over his whole week); the first game that clears its threshold is his
+     lock, else the decision is still open. Ex-ante optimal can be ex-post poor: on Sun 10/25 it
+     had Barnes locked at Wed 45 (Fri 60.5) and Herro at Wed 46 (Fri 62.5), and gave 92% to
+     win; treating Sleeper's displayed numbers as banked had given 71%. The truth for a real
+     manager is in between; both say lock George 39 and Brown 50.
    - **`matchup.py`**: simulates both lineups through the week (threshold policy, per-game
      B2B `p_play`, forced final game, 0 if he sits), common random numbers per slot, and
      `decide` = LOCK vs ROLL by chance of winning the week; falls back to the expected-points

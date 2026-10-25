@@ -74,6 +74,27 @@ class Slot:
         return lock_threshold(self.distribution, games_after, later)  # type: ignore[arg-type]
 
 
+def policy_lock(distribution: ScoreDistribution, completed_scores: Sequence[float],
+                p_play_by_game: Sequence[float]) -> float | None:
+    """The score an expected-value manager would have locked by now, or None if he would
+    still be waiting.
+
+    Replays the finished games in order: after game ``i``, lock if its score reaches the
+    threshold for the games that were still to come then (``p_play_by_game[i + 1:]``, one
+    probability per game of his whole week). Used for the **opponent**, whose locks Sleeper
+    never shows (``locks.py``): the user asked to assume he locks optimally (2026-10-25).
+    """
+    if len(p_play_by_game) < len(completed_scores):
+        raise ValueError("p_play_by_game must cover every game of the week")
+    for index, score in enumerate(completed_scores):
+        later = list(p_play_by_game[index + 1:])
+        if not later:
+            return None  # his last game: nothing to decide, it simply counts
+        if score >= lock_threshold(distribution, len(later), later):
+            return score
+    return None
+
+
 def slot_outcomes(slot: Slot, rng: np.random.Generator, n_sims: int, force: Force | None = None) -> np.ndarray:
     """The score this slot ends the week with, in each of ``n_sims`` simulated weeks."""
     if slot.locked is not None:

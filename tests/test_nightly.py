@@ -47,13 +47,18 @@ def test_an_earlier_game_shown_after_a_newer_one_is_unclear() -> None:
     s = build(games, 43.5, {"2026-10-20": 43.5, "2026-10-22": 41.0})
     assert s.lock.state == "unclear" and s.slot.pending == 41.0 and s.slot.decision_open
     assert "assumes you have not locked him" in s.gap
-    # For the opponent, Sleeper's number is treated as banked.
+    # For the opponent, Sleeper's number means nothing; he is assumed to lock optimally.
+    # 43.5 and 41 are both under the mean-45 thresholds with games to come: still waiting.
     status = {}
     for g in games:
         status[(g.home, g.date)] = status[(g.away, g.date)] = g.status
     theirs = build_starter("1711", 43.5, BROWN, schedule_frame(games), status,
                            {"2026-10-20": 43.5, "2026-10-22": 41.0}, 1, N45, 0.9, mine=False)
-    assert theirs.slot.locked == 43.5 and not theirs.slot.decision_open
+    assert theirs.slot.locked is None and theirs.slot.pending == 41.0
+    # A big first game is locked by the policy, whatever Sleeper shows.
+    big = build_starter("1711", 41.0, BROWN, schedule_frame(games), status,
+                        {"2026-10-20": 62.0, "2026-10-22": 41.0}, 1, N45, 0.9, mine=False)
+    assert big.slot.locked == 62.0 and big.lock.note == "assumed: locks optimally"
 
 
 def test_a_reported_lock_wins_over_whatever_sleeper_shows() -> None:
