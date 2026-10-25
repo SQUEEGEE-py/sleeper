@@ -68,6 +68,18 @@ from engine.model.scoring import box_from_sleeper_stats, load_rules, score_box
 
 CONFIG_PATH = Path("config/league.json")
 POOL_PATH = Path("data/board/pool.csv")
+LOCKS_PATH = Path("state/locks.json")
+
+
+def reported_locks(path: Path, week: int) -> dict[str, float]:
+    """Locks the user reported for ``week``, by Sleeper player id. Another week's file counts
+    for nothing: locks reset every week."""
+    if not path.exists():
+        return {}
+    data = json.loads(path.read_text(encoding="utf-8"))
+    if data.get("week") != week:
+        return {}
+    return {pid: float(entry["score"]) for pid, entry in (data.get("locked") or {}).items()}
 DEFAULT_USERNAME = "Squ33gee"
 EMPTY_SLOT = "0"
 SEED = 20261020
@@ -124,6 +136,7 @@ def build_starter(
     player_id: str, counted: float, player: Player | None, schedule: pd.DataFrame,
     status: dict[tuple[str, str], str], scores_by_date: dict[str, float], week: int,
     distribution, base_p_play: float | None, mine: bool = True,
+    reported_lock: float | None = None,
 ) -> Starter:
     """Lock status and simulation slot for one starter. ``distribution`` is None when the
     player has no model; that is a gap only if he still has games to simulate."""
@@ -155,6 +168,12 @@ def build_starter(
         if birth is None:
             starter.gap = "no birth date: back-to-back nights not priced"
 
+    if reported_lock is not None and mine:
+        # The user told us. Sleeper's own numbers cannot show a lock (state/locks.json).
+        starter.lock = LockStatus("locked", None, reported_lock, note="reported by you")
+        starter.gap = ""
+        starter.slot = Slot(name, distribution, remaining, locked=reported_lock)
+        return starter
     lock = starter.lock
     if lock.state == "unclear" and mine:
         # Sleeper still shows an earlier game: locked, or not caught up (locks.py). For the
@@ -295,7 +314,8 @@ def _state(s: Starter) -> str:
     if lock is None:
         state = s.gap
     elif lock.state == "locked":
-        state = f"LOCKED {lock.locked_score:g} ({lock.locked_on:%a})"
+        when = f"{lock.locked_on:%a}" if lock.locked_on else lock.note
+        state = f"LOCKED {lock.locked_score:g} ({when})"
     elif lock.state == "unclear":
         state = f"Sleeper shows {lock.locked_score:g} ({lock.locked_on:%a}) -- locked?"
     elif s.in_progress and lock.state in ("no_game_yet", "open"):
@@ -465,6 +485,7 @@ def run(args: argparse.Namespace) -> int:
     with SleeperClient() as client:
         games = client.get_nba_schedule(season_year)
         week = args.week or week_containing(games, today)
+        reported = reported_locks(args.locks, week)
         roster = my_roster(client, league_id, args.user)
         matchups = client.get_matchups_live(league_id, week)
         users = {u.user_id: u.display_name for u in client.get_users(league_id)}
@@ -510,7 +531,8 @@ def run(args: argparse.Namespace) -> int:
                         pass
                 starter = build_starter(player_id, float(counted), players.get(player_id), schedule,
                                         status, scores, week, distribution, base,
-                                        mine=m.roster_id == roster.roster_id)
+                                        mine=m.roster_id == roster.roster_id,
+                                        reported_lock=reported.get(player_id))
                 if starter.gap:
                     gaps.append(f"{owners[m.roster_id]}: {starter.name}: {starter.gap}")
                 built.append(starter)
@@ -593,6 +615,8 @@ def main() -> int:
     parser.add_argument("--post", action="store_true", help="also post the report to Discord")
     parser.add_argument("--only-if-due-today", action="store_true",
                         help="with --post: post only decisions whose next game is today (the afternoon reminder)")
+    parser.add_argument("--locks", type=Path, default=LOCKS_PATH,
+                        help="locks the user reported (Sleeper does not expose them)")
     parser.add_argument("--reason", default="",
                         help="with --post: why this run happened off-schedule (the commit that changed the model)")
     args = parser.parse_args()

@@ -1,12 +1,14 @@
-"""Infer whether a starter is locked, from the one number Sleeper does expose.
+"""Read what Sleeper's counted score says -- which, it turned out, is never whether he is locked.
 
 Probed 2026-10-21 (rule 6): Sleeper's public API has **no lock field** -- not in matchups,
-rosters, roster settings or the league. What it has is ``starters_points``, the score each slot
-currently counts. So:
+rosters, roster settings or the league. What it has is ``starters_points``. **Measured
+2026-10-23, it shows each starter's latest game whether or not he is locked**: Durant and
+Lillard, locked on Wednesday at 51 and 49.5, showed live scores during Friday's games, and
+Kawhi, locked at 48.5, showed Friday's 34 afterwards. So this module never returns "locked";
+locks come only from the user (``state/locks.json``, read by ``nightly``). What it still does:
 
-* **during** his team's game: an unlocked starter's counted score follows the live game (Jalen
-  Williams, 10/22), so counted == an earlier finished game means **locked** on it;
-* **after** a game: counted == an **earlier** game's score is **"unclear"**, not locked.
+* counted == an **earlier** game's score, during or after a newer one, is **"unclear"**:
+  Sleeper has not switched to the newer game yet.
   Corrected 2026-10-22: after the 76ers' Thursday game every 76ers *starter* in the league
   still counted Tuesday's score -- LeBron 38 (Thu 43), Brown 43.5 (Thu 41), Embiid 41.5 (Thu
   43.5), Maxey 56 (Thu 58), on three different rosters -- and the user confirmed he had locked
@@ -58,14 +60,13 @@ def infer_lock(
         return LockStatus("unexplained", note=f"Sleeper counts {counted:g} before any finished game")
 
     if game_in_progress:
-        # Every finished game is in the past; a match means it was locked. No match means the
-        # counted score is the live one, so he is not locked. A live score that happens to
-        # equal an old one would read as locked -- rare, and fixed by the next run.
+        # Locked players show their live score too (Durant and Lillard, 10/23), so a match to a
+        # finished game here is only Sleeper not having switched to the live game yet.
         earlier = [(day, score) for day, score in completed if matches(score)]
         if earlier:
             day, score = earlier[-1]
-            return LockStatus("locked", day, score)
-        return LockStatus("open", note="game in progress; not locked on any finished game")
+            return LockStatus("unclear", day, score, note=f"game in progress; Sleeper still shows {day:%a}'s {score:g}")
+        return LockStatus("open", note="game in progress")
 
     latest_day, latest_score = completed[-1]
     if matches(latest_score):

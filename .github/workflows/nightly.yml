@@ -26,6 +26,7 @@ on:
       - config/league.json
       - config/player_overrides.csv
       - snapshot/**
+      - state/**
   workflow_dispatch:
     inputs:
       only_if_due_today:

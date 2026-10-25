@@ -56,10 +56,30 @@ def test_an_earlier_game_shown_after_a_newer_one_is_unclear() -> None:
     assert theirs.slot.locked == 43.5 and not theirs.slot.decision_open
 
 
-def test_a_real_lock_is_seen_during_a_live_game() -> None:
-    games = with_status(**{"2026-10-22": "in_game"})
-    s = build(games, 43.5, {"2026-10-20": 43.5, "2026-10-22": 12.0})
-    assert s.lock.state == "locked" and s.slot.locked == 43.5 and not s.slot.decision_open
+def test_a_reported_lock_wins_over_whatever_sleeper_shows() -> None:
+    # Kawhi 10/23: locked at 48.5, Sleeper showing his next game's 34.
+    games = with_status(**{"2026-10-22": "complete"})
+    status = {}
+    for g in games:
+        status[(g.home, g.date)] = status[(g.away, g.date)] = g.status
+    s = build_starter("1711", 34.0, BROWN, schedule_frame(games), status,
+                      {"2026-10-20": 48.5, "2026-10-22": 34.0}, 1, N45, 0.9, reported_lock=48.5)
+    assert s.lock.state == "locked" and s.slot.locked == 48.5 and not s.slot.decision_open
+    assert "reported by you" in s.lock.note and not s.gap
+    # Only the user's own players: the opponent's locks are never reported.
+    theirs = build_starter("1711", 34.0, BROWN, schedule_frame(games), status,
+                           {"2026-10-20": 48.5, "2026-10-22": 34.0}, 1, N45, 0.9, mine=False, reported_lock=48.5)
+    assert theirs.slot.locked is None
+
+
+def test_reported_locks_count_only_for_their_week(tmp_path) -> None:
+    import json
+    from engine.jobs.nightly import reported_locks
+    path = tmp_path / "locks.json"
+    path.write_text(json.dumps({"week": 1, "locked": {"1433": {"name": "Durant", "score": 51.0}}}), encoding="utf-8")
+    assert reported_locks(path, 1) == {"1433": 51.0}
+    assert reported_locks(path, 2) == {}
+    assert reported_locks(tmp_path / "missing.json", 1) == {}
 
 
 def test_a_dnp_is_a_zero_not_a_missing_game() -> None:
