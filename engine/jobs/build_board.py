@@ -92,7 +92,13 @@ def candidate_players(logs: pd.DataFrame, season: str) -> pd.DataFrame:
     counts = logs.groupby(["nba_player_id", "season"]).size().unstack(fill_value=0)
     recent_ok = counts.get(latest, pd.Series(0, index=counts.index)) >= MIN_RECENT_GAMES
     any_ok = (counts >= MIN_RECENT_GAMES).any(axis=1)
-    keep = counts.index[any_ok]
+    # Anyone who has played the season being played, however few games. Without this, every
+    # rookie fell out of the pool the moment the season started (2026-10-25: 43 players,
+    # Caleb Wilson and Darryn Peterson among them): no longer "preseason only", so not a
+    # rookie, and not yet ten games, so not a candidate. The model handles thin histories
+    # itself (``PlayerModel.veteran`` shrinks them toward their projected-minutes role).
+    playing_now = counts.get(season, pd.Series(0, index=counts.index)) > 0
+    keep = counts.index[any_ok | playing_now]
 
     latest_rows = (
         logs[logs["nba_player_id"].isin(keep)]

@@ -32,7 +32,9 @@ from __future__ import annotations
 import argparse
 import ast
 import json
+import os
 import sys
+import traceback
 from dataclasses import dataclass, field
 from datetime import date, datetime, timezone
 from pathlib import Path
@@ -652,7 +654,20 @@ def main() -> int:
             except Exception:
                 pass
         print(f"nightly failed; traceback in {log_path}", file=sys.stderr)
+        if os.environ.get("GITHUB_ACTIONS"):
+            # An annotation is public on the run page; step logs need a GitHub login, and
+            # without this the 10/26 failure showed only "exit code 1".
+            print(actions_error_annotation(error))
         raise
+
+
+def actions_error_annotation(error: BaseException) -> str:
+    """A GitHub Actions ``::error`` line naming the failure, with its innermost frame."""
+    frame = traceback.extract_tb(error.__traceback__)[-1] if error.__traceback__ else None
+    where = f" at {Path(frame.filename).name}:{frame.lineno} in {frame.name}" if frame else ""
+    text = f"{type(error).__name__}: {error}{where}"
+    escaped = text.replace("%", "%25").replace("\r", "%0D").replace("\n", "%0A")
+    return f"::error title=Nightly advisor failed::{escaped[:1000]}"
 
 
 if __name__ == "__main__":

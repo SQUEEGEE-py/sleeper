@@ -58,7 +58,7 @@ pushed.
 Everything runnable today, in the order you would use it:
 
 ```
-uv run pytest                                             # 413 tests, none need the network
+uv run pytest                                             # 419 tests, none need the network
 uv run python -m engine.jobs.verify_league                # config vs live Sleeper; exits 1 on drift
 uv run python -m engine.jobs.ingest_history [--force]     # LOCAL ONLY: logs + schedule -> parquet
 uv run python -m engine.jobs.build_board [--top 150]      # -> data/board/{board.csv,board.html,pool.csv}
@@ -74,8 +74,8 @@ uv run python -m engine.jobs.resolve_scoring                            # flags 
 ```
 
 Per-file test counts: scoring 89, distributions 38, lockin 37, nba_stats 26, lineup 25,
-player_ids 23, draft_sim 29, lock_sheet 17, rookies 14, valuation 11, draft_live 11,
-verify_league 8, runtime 4, matchup 14, locks 10, nightly 10, alerts 6, resolve_scoring 5, aging 7, roles 6, roster_moves 10, nightly_roster 6, trades 8.
+player_ids 23, draft_sim 29, lock_sheet 17, rookies 15, valuation 11, draft_live 11,
+verify_league 8, runtime 4, matchup 14, locks 10, nightly 10, alerts 6, resolve_scoring 5, aging 7, roles 6, roster_moves 10, nightly_roster 6, trades 8, http_retry 5.
 
 `data/` is gitignored and regenerable. **On a fresh checkout run `ingest_history` then
 `build_board` before anything else** -- the 2026-10-16 session started with no `data/` at all.
@@ -743,7 +743,27 @@ LeBron Sat 38.7 -> 34.0, Kyrie Fri 34.8 -> 30.6); starting nine week value 482.9
    - First real report (Wed night, week 1): 74% to win; **LOCK Durant 51 and Lillard 49.5**,
      roll the rest. All 17 finished games in the matchup rescored to Sleeper's exact counted
      scores -- early support for the scoring config, though none tested the open flags.
-   **Still to do:** the week-long Sleeper-vs-stats.nba.com box-score diff (~2026-10-27).
+   - **Box-score diff done 2026-10-25** (week 1, every rostered player, 258 player-games):
+     235 score identically from stats.nba.com logs and Sleeper's per-game stats; 20 differ
+     only by technicals/flagrants (Sleeper has them, stats.nba.com does not -- the known
+     `GAME_LOG_MISSING_STATS` gap); 3 differ by one steal (a stat correction on one side).
+     **Sleeper's per-game stats are the better source**, so building current-season logs from
+     them in the cloud is safe -- that would end the weekly laptop snapshot refresh.
+   - **Failed run, Mon 2026-10-26** (schedule, started 14:34 UTC -- GitHub ran the 07:43 job
+     ~7 h late): exit 1 after **32 s**, i.e. early, in a fetch; the same commit and snapshot ran
+     cleanly afterwards, so it was transient. Step logs need a login and the public page showed
+     only "exit code 1". Fixes: `engine/ingest/http_retry.py` -- every Sleeper, ESPN and Discord
+     call retries twice (2 s, 6 s) on timeouts, connection errors, 5xx and 429, never on other
+     4xx; and a failed run in Actions prints a `::error` annotation with the error and its
+     innermost frame, which **is** public on the run page.
+   - **Week-2 prep, 2026-10-25.** First snapshot refresh with this season's games (859
+     regular-season rows). It exposed a bug: **every rookie fell out of the pool** once he had
+     played (no longer preseason-only, not yet 10 games) -- 43 players, incl. the user's Caleb
+     Wilson. `candidate_players` now also keeps anyone with a game in the season being
+     played; pool back to 504, top-200 safety net empty. `state/locks.json` moved to week 2,
+     empty. **Known weakness found:** `p_play` from a handful of games is not shrunk, so Caleb
+     Wilson shows "plays 100%" and the week-2 lock sheet suggested starting him over LeBron --
+     at a typical 87% the two are a toss-up. Shrink availability for thin histories next.
 5. ~~Resolve the scoring ambiguities~~ -- **done 2026-10-22: both true.** `engine/jobs/
    resolve_scoring.py` used **last season's league** (identical scoring, Lock-In, complete)
    instead of waiting for week 1: 2666 player-weeks, each game rescored under all four flag

@@ -16,6 +16,8 @@ from typing import Iterable
 
 import httpx
 
+from engine.ingest.http_retry import request_with_retry
+
 SCOREBOARD_URL = "https://site.api.espn.com/apis/site/v2/sports/basketball/nba/scoreboard"
 
 ESPN_TO_NBA = {"GS": "GSW", "NO": "NOP", "NY": "NYK", "SA": "SAS", "UTAH": "UTA", "WSH": "WAS"}
@@ -43,7 +45,7 @@ def fetch_tip_times(days: Iterable[date], timeout: float = 20.0) -> dict[tuple[s
     tips: dict[tuple[str, str], datetime] = {}
     with httpx.Client(timeout=timeout) as http:
         for day in sorted(set(days)):
-            response = http.get(SCOREBOARD_URL, params={"dates": day.strftime("%Y%m%d")})
-            response.raise_for_status()
+            response = request_with_retry(
+                lambda day=day: http.get(SCOREBOARD_URL, params={"dates": day.strftime("%Y%m%d")}))
             tips.update(parse_tip_times(response.json(), day))
     return tips

@@ -215,3 +215,15 @@ def test_candidates_include_a_star_who_missed_last_season() -> None:
     assert set(candidates.index) == {"Injured Star", "Healthy Starter"}
     assert bool(candidates.loc["Injured Star", "missed_last_season"]) is True
     assert bool(candidates.loc["Healthy Starter", "missed_last_season"]) is False
+
+
+def test_candidates_include_a_rookie_once_the_season_starts() -> None:
+    """2026-10-25: every rookie with a regular-season game fell out of the pool -- no longer
+    preseason-only, and short of ten games. One game this season is enough to be valued."""
+    logs = frame(
+        player_games(1, "2025-26", 70, 30.0, 35.0, name="Veteran"),
+        player_games(2, "2026-27", 3, 28.0, 30.0, name="Rookie"),
+        player_games(3, "2025-26", MIN_RECENT_GAMES - 1, 10.0, 8.0, name="Cameo"),
+    )
+    candidates = set(candidate_players(logs, "2026-27")["player_name"])
+    assert candidates == {"Veteran", "Rookie"}

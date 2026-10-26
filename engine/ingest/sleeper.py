@@ -13,6 +13,8 @@ from pathlib import Path
 from typing import Any
 
 import httpx
+
+from engine.ingest.http_retry import request_with_retry
 from pydantic import BaseModel, ConfigDict
 
 BASE_URL = "https://api.sleeper.app/v1"
@@ -197,8 +199,7 @@ class SleeperClient:
         cached = _read_cache(self.cache_dir, cache_key, ttl_seconds)
         if cached is not None:
             return cached
-        response = self._http.get(path)
-        response.raise_for_status()
+        response = request_with_retry(lambda: self._http.get(path))
         data = response.json()
         _write_cache(self.cache_dir, cache_key, data)
         return data
@@ -253,8 +254,7 @@ class SleeperClient:
 
     def _get_fresh(self, path: str, cache_key: str) -> Any:
         """Always hit the network, then cache. For state that changes by the second."""
-        response = self._http.get(path)
-        response.raise_for_status()
+        response = request_with_retry(lambda: self._http.get(path))
         data = response.json()
         _write_cache(self.cache_dir, cache_key, data)
         return data
@@ -315,10 +315,9 @@ class SleeperClient:
         key = f"projections_{season}"
         data = _read_cache(self.cache_dir, key, ADP_CACHE_TTL_SECONDS)
         if data is None:
-            response = self._http.get(
+            response = request_with_retry(lambda: self._http.get(
                 f"{PROJECTIONS_URL}/{season}", params={"season_type": "regular"}
-            )
-            response.raise_for_status()
+            ))
             data = response.json()
             _write_cache(self.cache_dir, key, data)
         rows = [ProjectionRow.model_validate(row) for row in data]

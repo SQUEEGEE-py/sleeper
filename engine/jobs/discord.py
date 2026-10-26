@@ -11,6 +11,8 @@ import os
 
 import httpx
 
+from engine.ingest.http_retry import request_with_retry
+
 WEBHOOK_ENV = "DISCORD_WEBHOOK_URL"
 MESSAGE_LIMIT = 2000
 
@@ -46,5 +48,5 @@ def post(text: str, url: str, timeout: float = 15.0) -> None:
     """Post ``text``, split as needed. Raises on any non-2xx so a failed alert is loud."""
     with httpx.Client(timeout=timeout) as http:
         for message in chunk(text):
-            response = http.post(url, json={"content": message, "allowed_mentions": {"parse": []}})
-            response.raise_for_status()
+            request_with_retry(
+                lambda message=message: http.post(url, json={"content": message, "allowed_mentions": {"parse": []}}))
