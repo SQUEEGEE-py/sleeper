@@ -35,6 +35,9 @@ DEFAULT_CACHE_DIR = Path("data/cache/sleeper")
 
 # players/nba is a multi-MB payload Sleeper asks callers to fetch at most once a day.
 PLAYERS_CACHE_TTL_SECONDS = 24 * 60 * 60
+# For injury statuses: the nightly job runs twice a day, so this keeps it to about two
+# fetches a day while never acting on a status more than an hour old.
+INJURY_STATUS_TTL_SECONDS = 60 * 60
 
 
 class League(BaseModel):
@@ -327,8 +330,10 @@ class SleeperClient:
             if row.stats.get("adp_std") is not None
         }
 
-    def get_players(self) -> dict[str, Player]:
-        data = self._get(
-            "/players/nba", "players_nba", ttl_seconds=PLAYERS_CACHE_TTL_SECONDS
-        )
+    def get_players(self, ttl_seconds: float = PLAYERS_CACHE_TTL_SECONDS) -> dict[str, Player]:
+        """The player dictionary. Cached a day by default -- fine for names and teams, too stale
+        for injury statuses: on 2026-10-27 a day-old copy still had Kawhi as DTD after he was
+        ruled Out, so the IR alert stayed silent. Callers that act on statuses pass
+        ``INJURY_STATUS_TTL_SECONDS``."""
+        data = self._get("/players/nba", "players_nba", ttl_seconds=ttl_seconds)
         return {pid: Player.model_validate(p) for pid, p in data.items()}

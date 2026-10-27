@@ -122,3 +122,24 @@ def test_no_birth_date_is_flagged_not_guessed() -> None:
 def test_week_containing() -> None:
     assert week_containing(GAMES, date(2026, 10, 21)) == 1  # no games today: next game's week
     assert week_containing(GAMES, date(2026, 10, 26)) == 2
+
+
+def test_injury_swap_picks_the_best_healthy_eligible_bench_player() -> None:
+    from engine.jobs.nightly import Starter, injury_swaps
+    from engine.model.matchup import Slot
+    from engine.model.locks import LockStatus
+    hurt = Starter("k", "Kawhi Leonard", "TOR", 0.0)
+    bench = [
+        (Starter("b", "Saddiq Bey", "NOP", 0.0, slot=Slot("Bey", N45, (0.9, 0.9, 0.9))), ("PF", "SF")),
+        (Starter("w", "Caleb Wilson", "CHI", 0.0, slot=Slot("Wilson", N45, (0.9, 0.9))), ("PF", "SF")),
+        (Starter("g", "Guard Only", "LAC", 0.0, slot=Slot("G", N45, (1.0, 1.0, 1.0, 1.0))), ("PG",)),
+        (Starter("x", "Also Hurt", "LAL", 0.0, slot=Slot("X", N45, (0.9, 0.9, 0.9))), ("SF",)),
+    ]
+    players = {"k": Player(player_id="k", injury_status="Out"), "x": Player(player_id="x", injury_status="Out"),
+               "b": Player(player_id="b"), "w": Player(player_id="w"), "g": Player(player_id="g")}
+    (swap,) = injury_swaps([hurt], ["F#1"], bench, players)
+    assert [name for name, _, _ in swap.options] == ["Saddiq Bey", "Caleb Wilson"]  # 3 games beat 2
+    assert "start Saddiq Bey at F" in swap.describe()
+    # A locked starter's score is banked: nothing to swap.
+    hurt.lock = LockStatus("locked", None, 48.5)
+    assert injury_swaps([hurt], ["F#1"], bench, players) == []

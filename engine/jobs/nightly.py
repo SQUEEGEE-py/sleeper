@@ -45,7 +45,7 @@ from dotenv import load_dotenv
 
 from engine.ingest.espn import fetch_tip_times
 from engine.ingest.nba_stats import DATA_DIR, GAME_TYPE_REGULAR, previous_seasons
-from engine.ingest.sleeper import Matchup, Player, ScheduledGame, SleeperClient
+from engine.ingest.sleeper import INJURY_STATUS_TTL_SECONDS, Matchup, Player, ScheduledGame, SleeperClient
 from engine.jobs.build_board import load_logs
 from engine.jobs.discord import WEBHOOK_ENV, post, webhook_url
 from engine.jobs.lock_sheet import GameSlot, games_p_play, my_roster, parse_birth_date, team_week_games
@@ -54,7 +54,8 @@ from engine.model.locks import LockStatus, infer_lock
 from engine.model.matchup import DEFAULT_SIMS, Decision, Odds, Slot, decide, policy_lock, win_probability
 from engine.model.player_model import PlayerModel, birth_dates_by_nba_id
 from engine.model.roles import MIN_GAMES, RoleCheck, role_check
-from engine.model.lineup import starting_slots
+from engine.model.lineup import is_eligible, slot_position, starting_slots
+from engine.model.lockin import weekly_value
 from engine.model.trades import Deadline, Trade, TradePlayer, find_trades, post_trades_today
 from engine.model.trades import deadline as trade_deadline
 from engine.model.roster_moves import (
@@ -64,6 +65,7 @@ from engine.model.roster_moves import (
     RosterPlayer,
     ir_alerts,
     rank_pickups,
+    unavailable,
     waiver_reason,
 )
 from engine.model.scoring import box_from_sleeper_stats, load_rules, score_box
@@ -169,6 +171,13 @@ def build_starter(
         remaining = tuple(games_p_play(base_p_play, starter.upcoming, birth))
         if birth is None:
             starter.gap = "no birth date: back-to-back nights not priced"
+        status = player.injury_status if player else None
+        if unavailable(status) and not starter.in_progress:
+            # Out (or suspended, DNR, Sleeper's IR): his next game is priced at 0. Later games
+            # keep their usual chance -- Sleeper gives no return date, and the status is
+            # re-read every run, so this rolls forward a game at a time instead of guessing.
+            remaining = (0.0,) + remaining[1:]
+            starter.gap = f"{status}: his next game is priced at 0"
 
     if reported_lock is not None and mine:
         # The user told us. Sleeper's own numbers cannot show a lock (state/locks.json).
@@ -236,8 +245,9 @@ def render_discord(week: int, their_name: str, mine: list[Starter], my_matchup: 
                    their_matchup: Matchup, odds: Odds | None,
                    decisions: list[tuple[Starter, Decision]], gaps: list[str],
                    roles: list[RoleCheck] | None = None, moves: RosterMoves | None = None,
-                   trades: TradeReport | None = None) -> str:
-    """The phone version: short lines, no columns, decisions first."""
+                   trades: TradeReport | None = None, swaps: list[Swap] | None = None) -> str:
+    """The phone version: short lines, no columns. Injured starters first, then decisions,
+    then every other starter -- the user asked that no one in the lineup go unmentioned."""
     if odds is None:
         head = f"**Week {week} vs {their_name}** -- win probability not computed (see gaps)"
     else:
@@ -245,6 +255,8 @@ def render_discord(week: int, their_name: str, mine: list[Starter], my_matchup: 
                 f"Sleeper now {my_matchup.points or 0:g}-{their_matchup.points or 0:g} · "
                 f"projected {odds.my_mean:.0f}-{odds.their_mean:.0f}")
     lines = [head, ""]
+    for swap in swaps or []:
+        lines += [f"⚠️ **{swap.describe()}**", ""]
     if decisions:
         lines.append("Only if you have **not** already locked him:")
         for starter, decision in decisions:
@@ -256,9 +268,10 @@ def render_discord(week: int, their_name: str, mine: list[Starter], my_matchup: 
             lines.append(why)
     else:
         lines.append("No open lock decisions.")
-    locked = [f"{s.name} {s.lock.locked_score:g}" for s in mine if s.lock and s.lock.state == "locked"]
-    if locked:
-        lines += ["", "Locked: " + ", ".join(locked)]
+    decided = {s.player_id for s, _ in decisions}
+    others = [s for s in mine if s.player_id not in decided and s.player_id != EMPTY_SLOT]
+    if others:
+        lines += ["", "**The rest of your lineup**"] + [f"- {starter_line(s)}" for s in others]
     if moves is not None and (moves.ir or moves.pickups):
         priority = f" (waiver priority #{moves.waiver_position})" if moves.waiver_position else ""
         lines += ["", f"**Roster moves**{priority}"]
@@ -274,6 +287,24 @@ def render_discord(week: int, their_name: str, mine: list[Starter], my_matchup: 
     return "\n".join(lines)
 
 
+def starter_line(s: Starter) -> str:
+    """Where a starter with no open decision stands -- so every slot is in the report."""
+    lock = s.lock
+    if lock is not None and lock.state == "locked":
+        return f"{s.name}: locked {lock.locked_score:g}"
+    if s.slot is None:
+        return f"{s.name}: {s.gap or 'no model'}"
+    if not s.upcoming:
+        return f"{s.name}: done for the week, {s.counted:g} counts" if s.completed else f"{s.name}: no games this week"
+    games_after = len(s.slot.remaining_p_play) - 1
+    nxt = deadline(s) if s.next_tip else _day(s.next_game)
+    if s.in_progress:
+        return f"{s.name}: playing now"
+    if games_after == 0:
+        return f"{s.name}: last game {nxt} -- it counts as is"
+    return f"{s.name}: next game {nxt} -- lock it if he scores {s.slot.threshold(games_after):.1f}+"
+
+
 def decision_line(starter: Starter, decision: Decision) -> str:
     call = decision.call.upper()
     why = (f"counting {decision.pending:g}; lock is worth it at {decision.threshold:.1f}+ on expected "
@@ -287,7 +318,7 @@ def render(week: int, my_name: str, their_name: str, mine: list[Starter], theirs
            my_matchup: Matchup, their_matchup: Matchup, odds: Odds | None,
            decisions: list[tuple[Starter, Decision]], gaps: list[str],
            roles: list[RoleCheck] | None = None, moves: RosterMoves | None = None,
-           trades: TradeReport | None = None) -> str:
+           trades: TradeReport | None = None, swaps: list[Swap] | None = None) -> str:
     lines = [f"WEEK {week}: {my_name} vs {their_name}"]
     lines.append(f"Sleeper now: {my_matchup.points or 0:g} - {their_matchup.points or 0:g}")
     if odds is None:
@@ -308,6 +339,9 @@ def render(week: int, my_name: str, their_name: str, mine: list[Starter], theirs
     lines.append(f"\n{their_name.upper()}'S STARTERS")
     for s in theirs:
         lines.append(f"  {s.name:24} {_state(s)}")
+    if swaps:
+        lines.append("\nINJURED STARTERS")
+        lines += [f"  !! {swap.describe()}" for swap in swaps]
     if moves is not None:
         priority = f" (you are #{moves.waiver_position} in waiver priority)" if moves.waiver_position else ""
         lines.append(f"\nROSTER MOVES{priority}")
@@ -350,6 +384,51 @@ def _state(s: Starter) -> str:
 
 
 # --- main -----------------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class Swap:
+    out: str
+    status: str
+    slot: str
+    options: list[tuple[str, float, list[str]]]  # (bench player, value of his games left, days)
+
+    def describe(self) -> str:
+        if not self.options:
+            return (f"{self.out} is {self.status}: no healthy bench player with games left can play "
+                    f"{slot_position(self.slot)} -- look at free agents")
+        (name, value, days), *rest = self.options
+        text = (f"{self.out} is {self.status}: bench him and start {name} at {slot_position(self.slot)} "
+                f"({', '.join(days)}; worth {value:.1f})")
+        if rest:
+            text += " -- next best " + ", ".join(f"{n} {v:.1f}" for n, v, _ in rest[:2])
+        return text
+
+
+def injury_swaps(mine: list[Starter], slots: list[str], bench: list[tuple[Starter, tuple[str, ...]]],
+                 players: dict) -> list[Swap]:
+    """For each of the user's starters who is Out (or SUS, DNR, Sleeper's IR) and has not locked
+    a score, the bench players who could take his slot, ranked by what their games left this
+    week are worth (``weekly_value``; a bench player's earlier games do not count for you)."""
+    swaps = []
+    for starter, slot in zip(mine, slots):
+        player = players.get(starter.player_id)
+        status = player.injury_status if player else None
+        if not unavailable(status) or (starter.lock and starter.lock.state == "locked"):
+            continue
+        options = []
+        for candidate, positions in bench:
+            slot_obj = candidate.slot
+            healthy = not unavailable(getattr(players.get(candidate.player_id), "injury_status", None))
+            if (slot_obj is None or slot_obj.distribution is None or not slot_obj.remaining_p_play
+                    or not healthy or not is_eligible(positions, slot)):
+                continue
+            value = weekly_value(slot_obj.distribution, len(slot_obj.remaining_p_play), slot_obj.remaining_p_play)
+            days = [f"{g.game_date:%a}" + (" B2B" if g.b2b_second else "") for g in candidate.upcoming]
+            options.append((candidate.name, value, days))
+        options.sort(key=lambda o: -o[1])
+        swaps.append(Swap(starter.name, status, slot, options))
+    return swaps
 
 
 @dataclass
@@ -517,7 +596,7 @@ def run(args: argparse.Namespace) -> int:
         transactions = client.get_transactions_live(league_id, week)
         if week > 1:
             transactions += client.get_transactions_live(league_id, week - 1)
-        players = client.get_players()
+        players = client.get_players(ttl_seconds=INJURY_STATUS_TTL_SECONDS)
         # Read lazily by the model, so filling them here, before any distribution, is enough.
         model.birth_dates = birth_dates_by_nba_id(
             {int(nba_id): sid for sid, nba_id in pool["nba_player_id"].items()}, players)
@@ -562,6 +641,22 @@ def run(args: argparse.Namespace) -> int:
 
         mine, theirs = starters_of(mine_m), starters_of(theirs_m)
         roles = role_watch(mine_m.model_extra.get("players") or [], pool, model, players, season_games)
+        reserve_ids = set((roster.model_extra or {}).get("reserve") or [])
+        bench = []
+        for pid in roster.players or []:
+            if pid in (mine_m.starters or []) or pid in reserve_ids:
+                continue
+            player = players.get(pid)
+            dist = None
+            if pid in pool.index:
+                try:
+                    dist = model.distribution(int(pool.loc[pid, "nba_player_id"]))
+                except KeyError:
+                    pass
+            built = build_starter(pid, 0.0, player, schedule, status, {}, week, dist,
+                                  dist.p_play if dist else None)
+            bench.append((built, tuple((player.fantasy_positions or []) if player else [])))
+        swaps = injury_swaps(mine, starting_slots(config["roster_positions"]), bench, players)
         moves = roster_moves(config, roster, rosters, players, pool, status, today, transactions,
                              datetime.now(timezone.utc))
         gaps += moves.gaps
@@ -592,7 +687,7 @@ def run(args: argparse.Namespace) -> int:
                                          pair[0].next_game or date.max, pair[0].name))
 
     my_name, their_name = owners[mine_m.roster_id], owners[theirs_m.roster_id]
-    print(render(week, my_name, their_name, mine, theirs, mine_m, theirs_m, odds, decisions, gaps, roles, moves, trades))
+    print(render(week, my_name, their_name, mine, theirs, mine_m, theirs_m, odds, decisions, gaps, roles, moves, trades, swaps))
 
     if args.post:
         due_today = [d for d in decisions if d[0].next_game == today]
@@ -600,7 +695,7 @@ def run(args: argparse.Namespace) -> int:
             print("\nnot posted: no decision is due today")
             return 0
         shown = due_today if args.only_if_due_today else decisions
-        message = render_discord(week, their_name, mine, mine_m, theirs_m, odds, shown, gaps, roles, moves, trades)
+        message = render_discord(week, their_name, mine, mine_m, theirs_m, odds, shown, gaps, roles, moves, trades, swaps)
         if args.reason:
             message = rerun_banner(args.reason) + "\n" + message
         post_or_say(message)

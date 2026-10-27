@@ -58,7 +58,7 @@ pushed.
 Everything runnable today, in the order you would use it:
 
 ```
-uv run pytest                                             # 419 tests, none need the network
+uv run pytest                                             # 422 tests, none need the network
 uv run python -m engine.jobs.verify_league                # config vs live Sleeper; exits 1 on drift
 uv run python -m engine.jobs.ingest_history [--force]     # LOCAL ONLY: logs + schedule -> parquet
 uv run python -m engine.jobs.build_board [--top 150]      # -> data/board/{board.csv,board.html,pool.csv}
@@ -73,9 +73,9 @@ uv run python -m engine.jobs.probe_endpoints                            # stdlib
 uv run python -m engine.jobs.resolve_scoring                            # flags vs Sleeper counted scores
 ```
 
-Per-file test counts: scoring 89, distributions 38, lockin 37, nba_stats 26, lineup 25,
+Per-file test counts: scoring 89, distributions 39, lockin 37, nba_stats 26, lineup 25,
 player_ids 23, draft_sim 29, lock_sheet 17, rookies 15, valuation 11, draft_live 11,
-verify_league 8, runtime 4, matchup 14, locks 10, nightly 10, alerts 6, resolve_scoring 5, aging 7, roles 6, roster_moves 10, nightly_roster 6, trades 8, http_retry 5.
+verify_league 8, runtime 4, matchup 14, locks 10, nightly 11, alerts 7, resolve_scoring 5, aging 7, roles 6, roster_moves 10, nightly_roster 6, trades 8, http_retry 5.
 
 `data/` is gitignored and regenerable. **On a fresh checkout run `ingest_history` then
 `build_board` before anything else** -- the 2026-10-16 session started with no `data/` at all.
@@ -756,6 +756,21 @@ LeBron Sat 38.7 -> 34.0, Kyrie Fri 34.8 -> 30.6); starting nine week value 482.9
      call retries twice (2 s, 6 s) on timeouts, connection errors, 5xx and 429, never on other
      4xx; and a failed run in Actions prints a `::error` annotation with the error and its
      innermost frame, which **is** public on the run page.
+   - **Tue 2026-10-27, from the user: the report skipped part of the lineup, and Kawhi was
+     Out.** Four fixes:
+     - The Discord report now lists **every starter**: injured ones first, then open
+       decisions, then "the rest of your lineup" (locked / done / next game with the score to
+       lock at) -- `starter_line`.
+     - **Out starters get a swap alert** (`injury_swaps`): healthy, slot-eligible bench
+       players ranked by what their games left this week are worth. Kawhi -> Bey at F.
+     - **Stale injury status**: the IR alert said "nothing to do" because the local players
+       dictionary was a 24 h cache from when Kawhi was DTD. `get_players(ttl_seconds=)`;
+       nightly uses `INJURY_STATUS_TTL_SECONDS` (1 h). Out/SUS/DNR/IR starters now have their
+       **next game priced at 0** in the sim (later games unchanged; status re-read each run).
+     - **Thin-history availability shrunk**: `distributions.shrunk_availability`, toward the
+       measured rotation base rate 0.84 with a 10-game prior. Caleb Wilson's "plays 100%"
+       (4 of 4) is now 0.89, so the swap picks Bey (43.1) over him (40.7); veterans move
+       <0.002. Board and snapshot rebuilt.
    - **Week-2 prep, 2026-10-25.** First snapshot refresh with this season's games (859
      regular-season rows). It exposed a bug: **every rookie fell out of the pool** once he had
      played (no longer preseason-only, not yet 10 games) -- 43 players, incl. the user's Caleb

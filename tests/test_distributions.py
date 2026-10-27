@@ -358,3 +358,13 @@ def test_unknown_age_is_left_unpriced_not_guessed() -> None:
 def test_game_p_play_rejects_a_bad_base_rate() -> None:
     with pytest.raises(ValueError):
         game_p_play(1.1, True, 30)
+
+
+def test_thin_availability_is_shrunk_toward_the_rotation_base_rate() -> None:
+    # Caleb Wilson, 2026-10-27: four games out of four read as "plays 100%".
+    from engine.model.distributions import AVAILABILITY_PRIOR, shrunk_availability
+    assert AVAILABILITY_PRIOR == 0.84
+    assert shrunk_availability(4, 4) == pytest.approx((4 + 8.4) / 14)        # 0.886, not 1.0
+    assert shrunk_availability(0, 0) == pytest.approx(0.84)                  # no evidence: the prior
+    assert shrunk_availability(180, 210) == pytest.approx(188.4 / 220, abs=1e-9)  # a veteran barely moves
+    assert abs(shrunk_availability(180, 210) - 180 / 210) < 0.002

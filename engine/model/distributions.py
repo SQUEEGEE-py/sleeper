@@ -280,6 +280,25 @@ def availability(logs: pd.DataFrame, player_id: int) -> tuple[float, int, int]:
     return played / available, played, available
 
 
+# The share of team games a rotation player plays on an ordinary night, measured on 2023-26 for
+# the back-to-back study (0.838 for under-30s, the bulk of the league; 0.835 at 30-33).
+AVAILABILITY_PRIOR = 0.84
+AVAILABILITY_PRIOR_GAMES = 10.0
+
+
+def shrunk_availability(games_played: int, games_available: int) -> float:
+    """``p_play`` shrunk toward ``AVAILABILITY_PRIOR`` as if he had played that share of
+    ``AVAILABILITY_PRIOR_GAMES`` extra games.
+
+    A stint window starts at his first game and ends at his last, so a player who has played
+    every game of a short window reads 100% -- Caleb Wilson after four games (2026-10-27),
+    which had the advisor starting him over Bey and LeBron. With 10 prior games 4-of-4 reads
+    0.89; a veteran's 180-of-210 moves from 0.857 to 0.856.
+    """
+    return ((games_played + AVAILABILITY_PRIOR_GAMES * AVAILABILITY_PRIOR)
+            / (games_available + AVAILABILITY_PRIOR_GAMES))
+
+
 def build_distribution(
     logs: pd.DataFrame,
     player_id: int,
@@ -299,7 +318,8 @@ def build_distribution(
 
     values = player_logs["fp"].to_numpy(dtype=float)
     weights = recency_weights(player_logs["game_date"], half_life_games)
-    p_play, games_played, _ = availability(logs, player_id)
+    _, games_played, games_available = availability(logs, player_id)
+    p_play = shrunk_availability(games_played, games_available)
 
     distribution = EmpiricalScoreDistribution(
         values=values,
