@@ -1,5 +1,16 @@
 {
   "_comment": "Locks the user has reported, by Sleeper player id. Sleeper's public API does not expose locks: starters_points shows each starter's latest game (sometimes late) whether he is locked or not -- Durant and Lillard, locked 10/21, showed live scores during their 10/23 games, and Kawhi, locked at 48.5, showed his next game's 34 after it. So this file is the only source of lock status. Updated when the user reports a lock; entries count only for their week.",
-  "week": 2,
-  "locked": {}
+  "week": 3,
+  "locked": {
+    "1711": {
+      "name": "Jaylen Brown",
+      "score": 59.5,
+      "game": "2026-11-02"
+    },
+    "4862": {
+      "name": "Caleb Wilson",
+      "score": 51.0,
+      "game": "2026-11-02"
+    }
+  }
 }
