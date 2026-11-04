@@ -55,6 +55,14 @@ from engine.model.matchup import DEFAULT_SIMS, Decision, Odds, Slot, decide, pol
 from engine.model.player_model import PlayerModel, birth_dates_by_nba_id
 from engine.model.roles import MIN_GAMES, RoleCheck, role_check
 from engine.model.lineup import is_eligible, slot_position, starting_slots
+from engine.model.lineup_moves import (
+    MIN_LINEUP_GAIN,
+    LineupOption,
+    LineupPlan,
+    move_in_value,
+    plan_lineup,
+    stay_value,
+)
 from engine.model.lockin import weekly_value
 from engine.model.trades import Deadline, Trade, TradePlayer, find_trades, post_trades_today
 from engine.model.trades import deadline as trade_deadline
@@ -235,17 +243,22 @@ def _day(day: date | None) -> str:
 
 def deadline(starter: Starter) -> str:
     """When the decision closes: his next tip-off in Eastern time, else just the date."""
-    if starter.next_tip is not None:
-        tip = starter.next_tip.astimezone(EASTERN)
+    return _when(starter.next_tip, starter.next_game)
+
+
+def _when(tip: datetime | None, day: date | None) -> str:
+    if tip is not None:
+        tip = tip.astimezone(EASTERN)
         return f"{tip:%a} {tip:%I:%M %p}".replace(" 0", " ") + " ET"
-    return f"{_day(starter.next_game)} (tip time unknown)"
+    return f"{_day(day)} (tip time unknown)"
 
 
 def render_discord(week: int, their_name: str, mine: list[Starter], my_matchup: Matchup,
                    their_matchup: Matchup, odds: Odds | None,
                    decisions: list[tuple[Starter, Decision]], gaps: list[str],
                    roles: list[RoleCheck] | None = None, moves: RosterMoves | None = None,
-                   trades: TradeReport | None = None, swaps: list[Swap] | None = None) -> str:
+                   trades: TradeReport | None = None, swaps: list[Swap] | None = None,
+           lineup: LineupReport | None = None) -> str:
     """The phone version: short lines, no columns. Injured starters first, then decisions,
     then every other starter -- the user asked that no one in the lineup go unmentioned."""
     if odds is None:
@@ -257,6 +270,8 @@ def render_discord(week: int, their_name: str, mine: list[Starter], my_matchup: 
     lines = [head, ""]
     for swap in swaps or []:
         lines += [f"⚠️ **{swap.describe()}**", ""]
+    if lineup is not None and lineup.plan.changes:
+        lines += [f"🔁 **{lineup.headline()}**"] + [f"- {line}" for line in lineup.lines()] + [""]
     if decisions:
         lines.append("Only if you have **not** already locked him:")
         for starter, decision in decisions:
@@ -269,6 +284,8 @@ def render_discord(week: int, their_name: str, mine: list[Starter], my_matchup: 
     else:
         lines.append("No open lock decisions.")
     decided = {s.player_id for s, _ in decisions}
+    if lineup is not None:  # a player the lineup change benches is covered by that change
+        decided |= {p.player_id for p in lineup.plan.to_bench}
     others = [s for s in mine if s.player_id not in decided and s.player_id != EMPTY_SLOT]
     if others:
         lines += ["", "**The rest of your lineup**"] + [f"- {starter_line(s)}" for s in others]
@@ -318,7 +335,8 @@ def render(week: int, my_name: str, their_name: str, mine: list[Starter], theirs
            my_matchup: Matchup, their_matchup: Matchup, odds: Odds | None,
            decisions: list[tuple[Starter, Decision]], gaps: list[str],
            roles: list[RoleCheck] | None = None, moves: RosterMoves | None = None,
-           trades: TradeReport | None = None, swaps: list[Swap] | None = None) -> str:
+           trades: TradeReport | None = None, swaps: list[Swap] | None = None,
+           lineup: LineupReport | None = None) -> str:
     lines = [f"WEEK {week}: {my_name} vs {their_name}"]
     lines.append(f"Sleeper now: {my_matchup.points or 0:g} - {their_matchup.points or 0:g}")
     if odds is None:
@@ -342,6 +360,14 @@ def render(week: int, my_name: str, their_name: str, mine: list[Starter], theirs
     if swaps:
         lines.append("\nINJURED STARTERS")
         lines += [f"  !! {swap.describe()}" for swap in swaps]
+    if lineup is not None:
+        lines.append("\nLINEUP (rest of the week, expected points; locked, finished and in-game players stay put)")
+        if lineup.plan.changes:
+            lines.append(f"  !! {lineup.headline()}")
+            lines += [f"     {line}" for line in lineup.lines()]
+        else:
+            lines.append(f"  keep it: no change gains {MIN_LINEUP_GAIN:g}+ expected points "
+                         f"(best possible {lineup.plan.gain:+.1f})")
     if moves is not None:
         priority = f" (you are #{moves.waiver_position} in waiver priority)" if moves.waiver_position else ""
         lines.append(f"\nROSTER MOVES{priority}")
@@ -429,6 +455,86 @@ def injury_swaps(mine: list[Starter], slots: list[str], bench: list[tuple[Starte
         options.sort(key=lambda o: -o[1])
         swaps.append(Swap(starter.name, status, slot, options))
     return swaps
+
+
+def lineup_options(mine: list[Starter], bench: list[tuple[Starter, tuple[str, ...]]],
+                   players: dict) -> tuple[list[LineupOption | None], list[LineupOption]]:
+    """The user's starters and bench as ``lineup_moves`` options: each one's value for the rest
+    of the week if he starts from now, and whether he can be moved at all."""
+    def positions_of(pid: str) -> tuple[str, ...]:
+        player = players.get(pid)
+        return tuple((player.fantasy_positions or []) if player else [])
+
+    def days(s: Starter) -> tuple[str, ...]:
+        return tuple(f"{g.game_date:%a}" + (" B2B" if g.b2b_second else "") for g in s.upcoming)
+
+    starters: list[LineupOption | None] = []
+    for s in mine:
+        if s.player_id == EMPTY_SLOT:
+            starters.append(None)
+            continue
+        base = dict(player_id=s.player_id, name=s.name, positions=positions_of(s.player_id),
+                    next_game=s.next_game, next_tip=s.next_tip, days=days(s))
+        reason = ""
+        if s.slot is None:
+            reason = "no player model"
+        elif s.slot.locked is not None:
+            reason = "locked"
+        elif s.in_progress:
+            reason = "in a game now"
+        elif s.completed and not s.upcoming:
+            reason = "his week is over; his last game counts"
+        if reason:
+            value = s.slot.locked if s.slot is not None and s.slot.locked is not None else s.counted
+            starters.append(LineupOption(**base, value=value or 0.0, movable=False, fixed_reason=reason))
+        else:
+            starters.append(LineupOption(**base, value=stay_value(s.slot)))
+    options = []
+    for candidate, positions in bench:
+        slot = candidate.slot
+        if candidate.in_progress or slot is None or (slot.remaining_p_play and slot.distribution is None):
+            continue
+        # move_in_value reads only his games left: a pending score from the bench never counts.
+        options.append(LineupOption(candidate.player_id, candidate.name, positions, move_in_value(slot),
+                                    next_game=candidate.next_game, next_tip=candidate.next_tip,
+                                    days=days(candidate)))
+    return starters, options
+
+
+@dataclass
+class LineupReport:
+    plan: LineupPlan
+    p_win_before: float | None = None
+    p_win_after: float | None = None
+
+    def headline(self) -> str:
+        text = f"Lineup change: +{self.plan.gain:.1f} expected points for the rest of the week"
+        if self.p_win_before is not None and self.p_win_after is not None:
+            text += f" (win {self.p_win_before:.0%} -> {self.p_win_after:.0%})"
+        return text
+
+    def lines(self) -> list[str]:
+        out = [f"{change.describe()} -- before {_when(*change.deadline)}" for change in self.plan.changes]
+        if self.plan.to_bench:
+            out.append("to the bench: " + ", ".join(p.name for p in self.plan.to_bench))
+        return out
+
+
+def lineup_after(plan: LineupPlan, slots: list[str], mine: list[Starter],
+                 bench: list[tuple[Starter, tuple[str, ...]]]) -> list[Slot]:
+    """The simulation slots of the suggested lineup, in slot order. A starter keeps his own
+    ``Slot`` (pending score and all); a bench player comes in fresh -- his earlier games cannot
+    count for you."""
+    by_id: dict[str, Slot] = {s.player_id: s.slot for s in mine if s.slot is not None}
+    for candidate, _ in bench:
+        if candidate.slot is not None and candidate.player_id not in by_id:
+            by_id[candidate.player_id] = Slot(candidate.name, candidate.slot.distribution,
+                                              candidate.slot.remaining_p_play)
+    after = []
+    for slot in slots:
+        player = plan.assignment.get(slot)
+        after.append(by_id[player.player_id] if player is not None else Slot("(empty)", None))
+    return after
 
 
 @dataclass
@@ -665,13 +771,14 @@ def run(args: argparse.Namespace) -> int:
 
     # Deadlines need tip-off times; Sleeper has none, so they come from ESPN. A failure here
     # costs only the clock time, so it is a gap, not a crash.
-    next_days = {s.next_game for s in mine if s.next_game}
+    bench_starters = [b for b, _ in bench]
+    next_days = {s.next_game for s in mine + bench_starters if s.next_game}
     try:
         tips = fetch_tip_times(next_days)
     except Exception as error:
         tips = {}
         gaps.append(f"tip-off times unavailable from ESPN ({type(error).__name__}); deadlines by date only")
-    for starter in mine:
+    for starter in mine + bench_starters:
         if starter.next_game:
             starter.next_tip = tips.get((starter.team, starter.next_game.isoformat()))
 
@@ -686,16 +793,35 @@ def run(args: argparse.Namespace) -> int:
         decisions.sort(key=lambda pair: (pair[0].next_tip or datetime.max.replace(tzinfo=timezone.utc),
                                          pair[0].next_game or date.max, pair[0].name))
 
+    # Lineup changes for the rest of the week. An injured starter's swap alert is dropped when
+    # the plan already benches him -- one instruction, not two.
+    slots = starting_slots(config["roster_positions"])
+    start_options, bench_options = lineup_options(mine, bench, players)
+    plan = plan_lineup(slots, start_options, bench_options)
+    lineup = LineupReport(plan)
+    if plan.changes and odds is not None:
+        lineup.p_win_before = odds.p_win
+        lineup.p_win_after = win_probability(lineup_after(plan, slots, mine, bench), their_slots,
+                                             args.sims, SEED).p_win
+    benched = {p.name for p in plan.to_bench}
+    swaps = [swap for swap in swaps if swap.out not in benched]
+    # A player the plan benches has no lock decision left to make: drop his LOCK/ROLL line.
+    benched_ids = {p.player_id for p in plan.to_bench}
+    decisions = [d for d in decisions if d[0].player_id not in benched_ids]
+
     my_name, their_name = owners[mine_m.roster_id], owners[theirs_m.roster_id]
-    print(render(week, my_name, their_name, mine, theirs, mine_m, theirs_m, odds, decisions, gaps, roles, moves, trades, swaps))
+    print(render(week, my_name, their_name, mine, theirs, mine_m, theirs_m, odds, decisions, gaps, roles, moves, trades,
+                 swaps, lineup))
 
     if args.post:
         due_today = [d for d in decisions if d[0].next_game == today]
-        if args.only_if_due_today and not due_today:
+        change_due = any(c.deadline[1] == today for c in plan.changes)
+        if args.only_if_due_today and not due_today and not change_due:
             print("\nnot posted: no decision is due today")
             return 0
         shown = due_today if args.only_if_due_today else decisions
-        message = render_discord(week, their_name, mine, mine_m, theirs_m, odds, shown, gaps, roles, moves, trades, swaps)
+        message = render_discord(week, their_name, mine, mine_m, theirs_m, odds, shown, gaps, roles, moves, trades,
+                                 swaps, lineup)
         if args.reason:
             message = rerun_banner(args.reason) + "\n" + message
         post_or_say(message)
