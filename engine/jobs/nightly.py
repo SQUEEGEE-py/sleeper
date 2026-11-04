@@ -57,9 +57,11 @@ from engine.model.roles import MIN_GAMES, RoleCheck, role_check
 from engine.model.lineup import is_eligible, slot_position, starting_slots
 from engine.model.lineup_moves import (
     MIN_LINEUP_GAIN,
+    Audition,
     LineupOption,
     LineupPlan,
     move_in_value,
+    plan_auditions,
     plan_lineup,
     stay_value,
 )
@@ -272,6 +274,8 @@ def render_discord(week: int, their_name: str, mine: list[Starter], my_matchup: 
         lines += [f"⚠️ **{swap.describe()}**", ""]
     if lineup is not None and lineup.plan.changes:
         lines += [f"🔁 **{lineup.headline()}**"] + [f"- {line}" for line in lineup.lines()] + [""]
+    if lineup is not None and lineup.auditions:
+        lines += ["🎯 **Start for one game**"] + [f"- {line}" for line in lineup.audition_lines()] + [""]
     if decisions:
         lines.append("Only if you have **not** already locked him:")
         for starter, decision in decisions:
@@ -368,6 +372,11 @@ def render(week: int, my_name: str, their_name: str, mine: list[Starter], theirs
         else:
             lines.append(f"  keep it: no change gains {MIN_LINEUP_GAIN:g}+ expected points "
                          f"(best possible {lineup.plan.gain:+.1f})")
+        if lineup.auditions:
+            lines.append("  AUDITIONS -- a bench player who plays first, for one game:")
+            lines += [f"  !! {line}" for line in lineup.audition_lines()]
+        else:
+            lines.append("  no bench player plays before a starter he could stand in for, with a gain")
     if moves is not None:
         priority = f" (you are #{moves.waiver_position} in waiver priority)" if moves.waiver_position else ""
         lines.append(f"\nROSTER MOVES{priority}")
@@ -488,16 +497,17 @@ def lineup_options(mine: list[Starter], bench: list[tuple[Starter, tuple[str, ..
             value = s.slot.locked if s.slot is not None and s.slot.locked is not None else s.counted
             starters.append(LineupOption(**base, value=value or 0.0, movable=False, fixed_reason=reason))
         else:
-            starters.append(LineupOption(**base, value=stay_value(s.slot)))
+            starters.append(LineupOption(**base, value=stay_value(s.slot), sim=s.slot))
     options = []
     for candidate, positions in bench:
         slot = candidate.slot
         if candidate.in_progress or slot is None or (slot.remaining_p_play and slot.distribution is None):
             continue
-        # move_in_value reads only his games left: a pending score from the bench never counts.
-        options.append(LineupOption(candidate.player_id, candidate.name, positions, move_in_value(slot),
+        # Fresh: a bench player's earlier games never count for you, so no pending score.
+        fresh = Slot(candidate.name, slot.distribution, slot.remaining_p_play)
+        options.append(LineupOption(candidate.player_id, candidate.name, positions, move_in_value(fresh),
                                     next_game=candidate.next_game, next_tip=candidate.next_tip,
-                                    days=days(candidate)))
+                                    days=days(candidate), sim=fresh))
     return starters, options
 
 
@@ -506,6 +516,11 @@ class LineupReport:
     plan: LineupPlan
     p_win_before: float | None = None
     p_win_after: float | None = None
+    auditions: list[Audition] = field(default_factory=list)
+
+    def audition_lines(self) -> list[str]:
+        return [f"{a.describe(_when(a.bench.next_tip, a.bench.next_game), _when(a.starter.next_tip, a.starter.next_game))}"
+                for a in self.auditions]
 
     def headline(self) -> str:
         text = f"Lineup change: +{self.plan.gain:.1f} expected points for the rest of the week"
@@ -798,7 +813,7 @@ def run(args: argparse.Namespace) -> int:
     slots = starting_slots(config["roster_positions"])
     start_options, bench_options = lineup_options(mine, bench, players)
     plan = plan_lineup(slots, start_options, bench_options)
-    lineup = LineupReport(plan)
+    lineup = LineupReport(plan, auditions=plan_auditions(plan, bench_options))
     if plan.changes and odds is not None:
         lineup.p_win_before = odds.p_win
         lineup.p_win_after = win_probability(lineup_after(plan, slots, mine, bench), their_slots,
@@ -815,7 +830,8 @@ def run(args: argparse.Namespace) -> int:
 
     if args.post:
         due_today = [d for d in decisions if d[0].next_game == today]
-        change_due = any(c.deadline[1] == today for c in plan.changes)
+        change_due = (any(c.deadline[1] == today for c in plan.changes)
+                      or any(a.bench.next_game == today for a in lineup.auditions))
         if args.only_if_due_today and not due_today and not change_due:
             print("\nnot posted: no decision is due today")
             return 0

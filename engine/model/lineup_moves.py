@@ -20,13 +20,23 @@ player where he is so equal-value reshuffles are never suggested. A change is su
 the whole lineup gains at least ``MIN_LINEUP_GAIN`` expected points. Expected points, not win
 probability, picks the lineup; the caller shows what the change does to the chance of winning.
 
+**Auditions** (``plan_auditions``, user request 2026-11-04). A bench player whose game comes
+*before* a starter's next game can take that starter's slot just for it: if he scores well,
+lock him; if not, put the starter back before the starter tips off (or keep the bench player
+in, if his own games left are worth more). Because a game counts only for whoever was starting
+when it tipped, the starter loses nothing but any pending score he is showing -- so with no
+pending score this is pure upside. Its value is one step of the stopping recursion with the
+starter as the fallback: ``p * E[max(X, c)] + (1 - p) * c``, ``c = max(W_starter, W_rest)``.
+Suggested at ``MIN_AUDITION_GAIN``. The swap back is the next report's lineup change (with its
+own ``MIN_LINEUP_GAIN``, so within a point of the threshold it may just say lock or roll).
+
 Pure: no network, no Sleeper types. ``nightly.py`` builds the options.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 
 import numpy as np
 from scipy.optimize import linear_sum_assignment
@@ -42,6 +52,14 @@ MIN_LINEUP_GAIN = 1.0
 # Bonus for keeping a player in the slot he holds. Far below any real difference, it only
 # breaks ties, so two equal lineups never produce a "change".
 _STAY_BONUS = 1e-3
+
+# Smallest gain worth an audition. Lower than a lineup change: with no pending score lost it
+# cannot cost points, only the two taps in the app.
+MIN_AUDITION_GAIN = 0.5
+
+# On the same day, the bench player's game must be over before the starter's tips: a game
+# takes about 2.5 hours, so the starter must tip at least this long after him.
+SAME_DAY_GAP = timedelta(hours=3)
 _INELIGIBLE = 1e9
 
 
@@ -77,6 +95,7 @@ class LineupOption:
     next_game: date | None = None
     next_tip: datetime | None = None  # UTC
     days: tuple[str, ...] = ()
+    sim: Slot | None = None  # his games left (and pending score), for auditions
 
 
 @dataclass(frozen=True)
@@ -117,6 +136,85 @@ class LineupPlan:
     @property
     def gain(self) -> float:
         return self.best_value - self.current_value
+
+
+def audition_value(bench: Slot, fallback: float) -> float:
+    """A bench player started for his next game only. After it: lock his score, keep him in
+    for his games left, or bring the starter back (``fallback``, the starter's value moved in
+    again) -- whichever is worth most. One step of the stopping recursion."""
+    first, rest = bench.remaining_p_play[0], bench.remaining_p_play[1:]
+    rest_value = weekly_value(bench.distribution, len(rest), rest) if rest else 0.0  # type: ignore[arg-type]
+    carry = max(fallback, rest_value)
+    return first * bench.distribution.expected_max(carry) + (1.0 - first) * carry  # type: ignore[union-attr]
+
+
+def plays_first(bench: LineupOption, starter: LineupOption) -> bool:
+    """Is the bench player's next game over before the starter's next one tips?"""
+    if bench.next_game is None or starter.next_game is None:
+        return False
+    if bench.next_game < starter.next_game:
+        return True
+    if bench.next_game == starter.next_game and bench.next_tip and starter.next_tip:
+        return starter.next_tip - bench.next_tip >= SAME_DAY_GAP
+    return False
+
+
+@dataclass(frozen=True)
+class Audition:
+    slot: str
+    starter: LineupOption
+    bench: LineupOption
+    value: float
+    gain: float
+    lock_at: float  # lock the bench player's score at this or more
+    keep_bench: bool  # below it: keep him in (his games left beat the starter), else swap back
+
+    def describe(self, when_bench: str, when_starter: str) -> str:
+        position = slot_position(self.slot)
+        text = (f"start {self.bench.name} at {position} for his {when_bench} game, in place of "
+                f"{self.starter.name} (next game {when_starter}): lock him if he scores "
+                f"{self.lock_at:.1f}+, ")
+        if self.keep_bench:
+            text += "otherwise keep him in -- his games left beat the starter's"
+        else:
+            text += f"otherwise put {self.starter.name} back before {when_starter}"
+        pending = self.starter.sim.pending if self.starter.sim is not None else None
+        cost = f"; gives up the {pending:g} {self.starter.name} is showing" if pending else "; nothing to lose"
+        return text + f" (+{self.gain:.1f} expected{cost})"
+
+
+def plan_auditions(plan: LineupPlan, bench: list[LineupOption],
+                   min_gain: float = MIN_AUDITION_GAIN) -> list[Audition]:
+    """Bench players worth starting for one game ahead of a starter who plays later, on top
+    of ``plan`` (the lineup after its changes). Each bench player and slot used once, best
+    gain first."""
+    starting = {p.player_id for p in plan.assignment.values() if p is not None}
+    fixed = {slot for slot, _ in plan.fixed}
+    options = []
+    for slot, starter in plan.assignment.items():
+        if starter is None or slot in fixed or not starter.movable or starter.sim is None:
+            continue
+        fallback = move_in_value(starter.sim)
+        for b in bench:
+            if (b.player_id in starting or not b.movable or b.sim is None or not b.sim.remaining_p_play
+                    or b.sim.distribution is None or not is_eligible(b.positions, slot)
+                    or not plays_first(b, starter)):
+                continue
+            value = audition_value(b.sim, fallback)
+            gain = value - starter.value
+            if gain >= min_gain:
+                rest = b.sim.remaining_p_play[1:]
+                rest_value = weekly_value(b.sim.distribution, len(rest), rest) if rest else 0.0
+                options.append(Audition(slot, starter, b, value, gain, max(fallback, rest_value),
+                                        keep_bench=rest_value > fallback))
+    chosen, used_slots, used_bench = [], set(), set()
+    for a in sorted(options, key=lambda a: -a.gain):
+        if a.slot not in used_slots and a.bench.player_id not in used_bench:
+            chosen.append(a)
+            used_slots.add(a.slot)
+            used_bench.add(a.bench.player_id)
+    never = datetime.max.replace(tzinfo=timezone.utc)
+    return sorted(chosen, key=lambda a: (a.bench.next_tip or never, a.bench.next_game or date.max, a.slot))
 
 
 def plan_lineup(slots: list[str], starters: list[LineupOption | None], bench: list[LineupOption],

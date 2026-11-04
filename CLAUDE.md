@@ -58,7 +58,7 @@ pushed.
 Everything runnable today, in the order you would use it:
 
 ```
-uv run pytest                                             # 433 tests, none need the network
+uv run pytest                                             # 441 tests, none need the network
 uv run python -m engine.jobs.verify_league                # config vs live Sleeper; exits 1 on drift
 uv run python -m engine.jobs.ingest_history [--force]     # LOCAL ONLY: logs + schedule -> parquet
 uv run python -m engine.jobs.build_board [--top 150]      # -> data/board/{board.csv,board.html,pool.csv}
@@ -75,7 +75,7 @@ uv run python -m engine.jobs.resolve_scoring                            # flags 
 
 Per-file test counts: scoring 89, distributions 39, lockin 37, nba_stats 26, lineup 25,
 player_ids 23, draft_sim 29, lock_sheet 17, rookies 15, valuation 11, draft_live 11,
-verify_league 8, runtime 4, matchup 14, locks 10, nightly 11, alerts 7, resolve_scoring 5, aging 7, roles 6, roster_moves 10, nightly_roster 6, trades 8, http_retry 5, lineup_moves 11.
+verify_league 8, runtime 4, matchup 14, locks 10, nightly 11, alerts 7, resolve_scoring 5, aging 7, roles 6, roster_moves 10, nightly_roster 6, trades 8, http_retry 5, lineup_moves 19.
 
 `data/` is gitignored and regenerable. **On a fresh checkout run `ingest_history` then
 `build_board` before anything else** -- the 2026-10-16 session started with no `data/` at all.
@@ -885,6 +885,16 @@ LeBron Sat 38.7 -> 34.0, Kyrie Fri 34.8 -> 30.6); starting nine week value 482.9
    is due that day. An injured starter's swap alert and a benched player's LOCK/ROLL line are
    dropped when the plan covers him. First live run (Wed 11/4): keep it -- Green for Kyrie is
    +0.5. Picked by expected points, not win probability. 6 mutations fail the suite.
+   **Auditions (same day, user request):** a bench player whose next game is over before a
+   starter's next one tips (earlier day, or same day with 3 h between tips) is suggested for
+   that one game: lock him at `max(W_starter, W_his rest)`+, else put the starter back (or keep
+   him in if his own games left are worth more). Value `p*E[max(X,c)] + (1-p)*c`; with no
+   pending score on the starter it cannot lose, so `MIN_AUDITION_GAIN` = 0.5. Each bench player
+   and slot once, best gain first, on top of the planned lineup; Discord "Start for one game".
+   The swap back is the next report's lineup change, which keeps its 1.0 bar -- within a point
+   of the lock line the next report may say lock/roll instead. Scratch check pretending Wed
+   11/4 was over: Green for Kyrie on Thu (lock at 39.6+, +4.6), Bey for Durant on Fri (+3.3).
+   7 more mutations fail the suite.
    **Step 7 is done.** Open follow-ups from it: the late-season availability drop for weeks
    22-24 (above), and rebuilding current-season logs from Sleeper in the cloud so the
    snapshot refresh stops being a laptop chore.

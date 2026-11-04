@@ -151,3 +151,104 @@ def test_lineup_after_brings_bench_players_in_fresh() -> None:
     plan = plan_lineup(["F#1"], starters, options)
     (slot,) = lineup_after(plan, ["F#1"], mine, bench)
     assert slot.name == "B" and slot.pending is None and slot.remaining_p_play == (1.0, 1.0)
+
+
+# --- auditions: a bench player who plays first, for one game ----------------------------------
+
+from scipy.stats import norm  # noqa: E402
+
+from engine.model.lineup_moves import audition_value, plan_auditions, plays_first  # noqa: E402
+
+FRI = date(2026, 11, 6)
+
+
+def e_max(c: float, mu: float = 45.0, sigma: float = 10.0) -> float:
+    """E[max(X, c)] for X ~ normal(mu, sigma), in closed form."""
+    z = (c - mu) / sigma
+    return c + sigma * (norm.pdf(z) - z * (1 - norm.cdf(z)))
+
+
+def sim_opt(pid: str, games: tuple[float, ...], positions=("PG",), day=None, hour=23, pending=None) -> LineupOption:
+    sim = Slot(pid, N45, games, pending=pending)
+    value = stay_value(sim) if pending is not None else move_in_value(sim)
+    return LineupOption(pid, pid.upper(), positions, value, next_game=day,
+                        next_tip=tip(day, hour) if day else None, sim=sim)
+
+
+def no_changes(slots, starters, bench):
+    return plan_lineup(slots, starters, bench, min_gain=1e9)  # auditions on the lineup as it is
+
+
+def test_a_bench_guard_tonight_stands_in_for_a_guard_who_plays_later() -> None:
+    starter = sim_opt("s", (1.0, 1.0), day=FRI)  # two games from Friday: 48.989
+    bench = sim_opt("b", (1.0,), day=THU)  # one game, tonight
+    (a,) = plan_auditions(no_changes(["G#1"], [starter], [bench]), [bench])
+    w2 = 48.989
+    assert a.value == pytest.approx(e_max(w2), abs=0.01) and a.gain == pytest.approx(e_max(w2) - w2, abs=0.01)
+    assert a.lock_at == pytest.approx(w2, abs=0.01) and not a.keep_bench
+    text = a.describe("Thu 7:00 PM ET", "Fri 7:00 PM ET")
+    assert "lock him if he scores 49.0+" in text and "put S back before Fri" in text and "nothing to lose" in text
+
+
+def test_a_bench_player_who_might_sit_is_worth_less_and_never_negative() -> None:
+    starter = sim_opt("s", (1.0, 1.0), day=FRI)
+    for p, expected in [(0.5, 0.5 * e_max(48.989) + 0.5 * 48.989), (0.0, None)]:
+        bench = sim_opt("b", (p,), day=THU)
+        found = plan_auditions(no_changes(["G#1"], [starter], [bench]), [bench], min_gain=0.0)
+        if expected is None:
+            assert audition_value(bench.sim, starter.value) == pytest.approx(starter.value)
+            assert [a.gain for a in found] == [pytest.approx(0.0)]  # Out tonight: worth exactly the starter
+        else:
+            assert found[0].value == pytest.approx(expected, abs=0.01)
+
+
+def test_the_starter_must_play_after_the_bench_players_game_is_over() -> None:
+    later = sim_opt("s", (1.0, 1.0), day=THU, hour=23)
+    assert not plays_first(sim_opt("b", (1.0,), day=FRI), later)  # starter plays first
+    assert not plays_first(sim_opt("b", (1.0,), day=THU, hour=21), later)  # same night, 2 h apart
+    assert plays_first(sim_opt("b", (1.0,), day=THU, hour=20), later)  # 3 h: his game is over
+    assert not plays_first(sim_opt("b", (1.0,), day=None), later)
+
+
+def test_no_audition_that_throws_away_a_good_pending_score() -> None:
+    starter = sim_opt("s", (1.0, 1.0), day=FRI, pending=60.0)  # stay: 60 showing
+    bench = sim_opt("b", (1.0,), day=THU)
+    assert plan_auditions(no_changes(["G#1"], [starter], [bench]), [bench]) == []
+    # A small pending score: the audition is still worth it, and the cost is said out loud.
+    starter = sim_opt("s", (1.0, 1.0), day=FRI, pending=10.0)
+    (a,) = plan_auditions(no_changes(["G#1"], [starter], [bench]), [bench])
+    assert "gives up the 10 S is showing" in a.describe("Thu", "Fri")
+
+
+def test_auditions_skip_fixed_ineligible_and_already_starting_players() -> None:
+    bench = sim_opt("b", (1.0,), day=THU)
+    locked = LineupOption("l", "L", ("PG",), 30.0, movable=False, next_game=FRI, sim=Slot("l", N45, (1.0,), locked=30.0))
+    assert plan_auditions(no_changes(["G#1"], [locked], [bench]), [bench]) == []
+    forward_slot = sim_opt("s", (1.0, 1.0), positions=("PF",), day=FRI)
+    assert plan_auditions(no_changes(["F#1"], [forward_slot], [bench]), [bench]) == []  # a PG cannot play F
+    starter = sim_opt("s", (1.0, 1.0), day=FRI)
+    plan = no_changes(["G#1", "UTIL#1"], [starter, bench], [])  # b is starting already
+    assert plan_auditions(plan, [bench]) == []
+
+
+def test_each_bench_player_auditions_once_for_the_slot_where_it_gains_most() -> None:
+    one = sim_opt("one", (1.0,), day=FRI)  # one game from Friday: 45 -- the cheaper slot to fill
+    two = sim_opt("two", (1.0, 1.0), day=FRI)
+    bench = sim_opt("b", (1.0,), day=THU)
+    (a,) = plan_auditions(no_changes(["G#1", "G#2"], [two, one], [bench]), [bench])
+    assert a.starter.player_id == "one" and a.gain == pytest.approx(e_max(45.0) - 45.0, abs=0.01)
+
+
+def test_keep_the_bench_player_in_when_his_games_left_beat_the_starter() -> None:
+    starter = sim_opt("s", (0.9,), day=FRI)  # 40.5
+    bench = sim_opt("b", (1.0, 1.0), day=THU)  # tonight, then one more (45)
+    (a,) = plan_auditions(no_changes(["G#1"], [starter], [bench]), [bench])
+    assert a.keep_bench and a.lock_at == pytest.approx(45.0) and "otherwise keep him in" in a.describe("Thu", "Fri")
+
+
+def test_lineup_options_carry_the_simulation_slot_and_bench_has_no_pending() -> None:
+    mine = [starter("s", Slot("s", N45, (1.0,), pending=12.0))]
+    mine[0].upcoming = [GameSlot(FRI, "BOS", True, False)]
+    bench = [(starter("b", Slot("b", N45, (1.0,), pending=70.0)), ("PG",))]
+    starters, options = lineup_options(mine, bench, {"s": Player(player_id="s", fantasy_positions=["PG"])})
+    assert starters[0].sim.pending == 12.0 and options[0].sim.pending is None
