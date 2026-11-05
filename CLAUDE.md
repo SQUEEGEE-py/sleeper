@@ -58,7 +58,7 @@ pushed.
 Everything runnable today, in the order you would use it:
 
 ```
-uv run pytest                                             # 450 tests, none need the network
+uv run pytest                                             # 455 tests, none need the network
 uv run python -m engine.jobs.verify_league                # config vs live Sleeper; exits 1 on drift
 uv run python -m engine.jobs.ingest_history [--force]     # LOCAL ONLY: logs + schedule -> parquet
 uv run python -m engine.jobs.build_board [--top 150]      # -> data/board/{board.csv,board.html,pool.csv}
@@ -76,7 +76,7 @@ uv run python -m engine.jobs.lock_feedback                             # check t
 
 Per-file test counts: scoring 89, distributions 39, lockin 37, nba_stats 26, lineup 25,
 player_ids 23, draft_sim 29, lock_sheet 17, rookies 15, valuation 11, draft_live 11,
-verify_league 8, runtime 4, matchup 14, locks 10, nightly 11, alerts 7, resolve_scoring 5, aging 7, roles 6, roster_moves 10, nightly_roster 6, trades 8, http_retry 5, lineup_moves 19, lock_feedback 9.
+verify_league 8, runtime 4, matchup 17, locks 10, nightly 11, alerts 9, resolve_scoring 5, aging 7, roles 6, roster_moves 10, nightly_roster 6, trades 8, http_retry 5, lineup_moves 19, lock_feedback 9.
 
 `data/` is gitignored and regenerable. **On a fresh checkout run `ingest_history` then
 `build_board` before anything else** -- the 2026-10-16 session started with no `data/` at all.
@@ -915,6 +915,23 @@ LeBron Sat 38.7 -> 34.0, Kyrie Fri 34.8 -> 30.6); starting nine week value 482.9
    `python -m engine.jobs.lock_feedback` once the secrets exist. 9 tests; 5 mutations fail them.
    **Probed 2026-11-05** (`lock_feedback_check.yml`, run 41966848717): token, webhook channel,
    reading, Message Content all work; the first live run posted 7 messages for Wed 11/4.
+   **One decision per slot (user, 2026-11-05).** The report said LOCK LeBron 40 *and* start
+   Jalen Green in his slot on Thursday: decisions and auditions were computed apart. Now an
+   audition on a starter with an open decision is folded into that decision
+   (`nightly.attach_stand_ins`): `matchup.decide` simulates LOCK, ROLL and STAND-IN
+   (`matchup.StandIn`: the bench player's next game, locked at the audition's line, else the
+   starter back with his pending score gone) and prints all three win chances; the expected-points
+   call is the option with the most expected points, overridden only beyond 2 SE as before. A
+   stand-in's deadline is the bench player's tip. Live, Thu 11/5 at 94% to win: LeBron -> START
+   Green Thu (45.0 expected vs roll 40.9 / lock 40; win 95/94/95), Durant -> LOCK 37.5 (96% vs
+   Bey first 95%, roll 94%; points call was Bey). 5 tests; 4 mutations fail the suite.
+   **Why LOCK on a score under the threshold** (asked the same day): the points call for Durant
+   37.5 and LeBron 40 was ROLL (rolling worth 40.1 / 40.9 -- Sleeper's Rotowire projections for
+   those games, 40.7 and 37.5/46.0 if he plays, agree); LOCK came from the matchup override,
+   94% ahead, where banking a sure score beats ~1-3 expected points with a chance of a 0.
+   Sleeper's per-game projections are at
+   `api.sleeper.com/projections/nba/player/{id}?season_type=regular&season=2026&grouping=week`
+   (probed 2026-11-05; conditional on playing, `gp` 1.0). Not used by the model.
    **Step 7 is done.** Open follow-ups from it: the late-season availability drop for weeks
    22-24 (above), and rebuilding current-season logs from Sleeper in the cloud so the
    snapshot refresh stops being a laptop chore.

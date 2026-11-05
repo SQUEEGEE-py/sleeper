@@ -7,7 +7,7 @@ import pytest
 
 from engine.model.distributions import NormalScoreDistribution
 from engine.model.lockin import weekly_value
-from engine.model.matchup import Slot, decide, slot_outcomes, team_outcomes, win_probability
+from engine.model.matchup import Slot, StandIn, decide, slot_outcomes, team_outcomes, win_probability
 
 N45 = NormalScoreDistribution(45.0, 10.0)
 
@@ -121,6 +121,51 @@ def test_a_call_that_cannot_change_the_result_keeps_the_ev_call() -> None:
     decision = decide(mine, [locked("them", 10.0)], 0, n_sims=2000)
     assert decision.p_win_lock == decision.p_win_roll == 1.0
     assert decision.call == decision.ev_call == "roll" and not decision.matchup_changed_it
+
+
+# --- stand-ins: one decision per slot (2026-11-05) -----------------------------------------
+
+
+def stand_in(bench_mean: float, then: Slot, lock_at: float, p: float = 1.0) -> StandIn:
+    bench = Slot("bench", NormalScoreDistribution(bench_mean, 10.0), (p,))
+    return StandIn(bench, lock_at, then, expected=0.0)
+
+
+def test_stand_in_locks_the_bench_score_or_falls_back() -> None:
+    back = locked("starter back", 30.0)
+    # Bench player always clears 0: his score counts.
+    high = slot_outcomes(Slot("s", N45, (1.0,), pending=40.0), rng(), 50_000, stand_in(60.0, back, -1e9))
+    assert high.mean() == pytest.approx(60.0, abs=0.2)
+    # He never clears 1000: the slot falls back, and the starter's pending 40 is gone.
+    low = slot_outcomes(Slot("s", N45, (1.0,), pending=40.0), rng(), 1000, stand_in(60.0, back, 1e9))
+    assert (low == 30.0).all()
+    # He sits: the fallback, never a 0 locked in.
+    sits = slot_outcomes(Slot("s", N45, (1.0,), pending=40.0), rng(), 1000, stand_in(60.0, back, -1e9, p=0.0))
+    assert (sits == 30.0).all()
+
+
+def test_one_decision_weighs_lock_roll_and_stand_in() -> None:
+    # Pending 40 vs a 45 threshold: the points call was ROLL. A 70-mean bench player first,
+    # locked at 45+, else the starter back, beats both on expected points and on win chance.
+    starter = Slot("open", N45, (1.0,), pending=40.0)
+    si = StandIn(Slot("bench", NormalScoreDistribution(70.0, 10.0), (1.0,)), 45.0,
+                 Slot("open", N45, (1.0,)), expected=69.0)
+    decision = decide([starter, locked("rest", 100.0)], [locked("them", 150.0)], 0, 20_000, stand_in=si)
+    assert decision.ev_call == decision.call == "stand_in"
+    assert decision.p_win_stand_in > decision.p_win_roll > decision.p_win_lock == 0.0
+    assert decision.stand_in_expected == 69.0
+    # Without one, the same slot is the old two-way call.
+    assert decide([starter, locked("rest", 100.0)], [locked("them", 150.0)], 0, 20_000).p_win_stand_in is None
+
+
+def test_ahead_a_sure_lock_beats_a_stand_in_with_more_expected_points() -> None:
+    # Locking 40 wins for sure. The stand-in has more expected points but can lose.
+    starter = Slot("open", N45, (1.0,), pending=40.0)
+    si = StandIn(Slot("bench", NormalScoreDistribution(50.0, 15.0), (0.9,)), 45.0,
+                 Slot("open", N45, (1.0,)), expected=50.0)
+    decision = decide([starter, locked("rest", 100.0)], [locked("them", 135.0)], 0, 20_000, stand_in=si)
+    assert decision.ev_call == "stand_in" and decision.call == "lock" and decision.matchup_changed_it
+    assert decision.p_win_lock == 1.0 > decision.p_win_stand_in
 
 
 def test_decide_needs_an_open_decision() -> None:

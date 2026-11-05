@@ -53,7 +53,7 @@ from engine.jobs.lock_feedback import Candidate as LockCandidate
 from engine.jobs.lock_sheet import GameSlot, games_p_play, my_roster, parse_birth_date, team_week_games
 from engine.jobs.runtime import log_exception, utf8_output
 from engine.model.locks import LockStatus, infer_lock
-from engine.model.matchup import DEFAULT_SIMS, Decision, Odds, Slot, decide, policy_lock, win_probability
+from engine.model.matchup import DEFAULT_SIMS, Decision, Odds, Slot, StandIn, decide, policy_lock, win_probability
 from engine.model.player_model import PlayerModel, birth_dates_by_nba_id
 from engine.model.roles import MIN_GAMES, RoleCheck, role_check
 from engine.model.lineup import is_eligible, slot_position, starting_slots
@@ -145,8 +145,9 @@ def feedback_candidates(week: int, mine: list["Starter"], slots: list[str],
         if status_by_date.get(day.isoformat(), {"pre_game"}) != {"complete"} or day.isoformat() not in s.played:
             continue
         d = advice.get(s.player_id)
-        call = (f"{d.call.upper()} (win {d.p_win_lock:.0%} if locked / {d.p_win_roll:.0%} if rolled) "
-                f"-- before {deadline(s)}") if d else ""
+        head = call_headline(s, d) if d and d.call == "stand_in" else (d.call.upper() if d else "")
+        call = (f"{head} ({win_chances(s, d)}) -- before "
+                f"{_when(*decision_deadline(s, d))}") if d else ""
         out.append(LockCandidate(week, day, s.player_id, s.name, slots[index], score, call))
     return out
 
@@ -211,6 +212,7 @@ class Starter:
     played: frozenset[str] = frozenset()  # dates (ISO) he has a box score for: a DNP has none
 
     next_tip: datetime | None = None  # UTC, from ESPN
+    stand_in: Audition | None = None  # a bench player who plays first, weighed in his decision
 
     @property
     def next_game(self) -> date | None:
@@ -350,9 +352,10 @@ def render_discord(week: int, their_name: str, mine: list[Starter], my_matchup: 
     if decisions:
         lines.append("Only if you have **not** already locked him:")
         for starter, decision in decisions:
-            lines.append(f"**{decision.call.upper()} {starter.name}** -- before {deadline(starter)}")
+            lines.append(f"**{call_headline(starter, decision)}** -- before "
+                         f"{_when(*decision_deadline(starter, decision))}")
             why = (f"counting {decision.pending:g} · lock at {decision.threshold:.1f}+ · "
-                   f"win {decision.p_win_lock:.0%} if locked / {decision.p_win_roll:.0%} if rolled")
+                   f"{win_chances(starter, decision)}")
             if decision.matchup_changed_it:
                 why += " · *matchup overrides the points call*"
             lines.append(why)
@@ -398,13 +401,48 @@ def starter_line(s: Starter) -> str:
     return f"{s.name}: next game {nxt} -- lock it if he scores {s.slot.threshold(games_after):.1f}+"
 
 
-def decision_line(starter: Starter, decision: Decision) -> str:
-    call = decision.call.upper()
-    why = (f"counting {decision.pending:g}; lock is worth it at {decision.threshold:.1f}+ on expected "
-           f"points; win chance {decision.p_win_lock:.0%} if locked vs {decision.p_win_roll:.0%} if rolled")
+def win_chances(starter: Starter, decision: Decision) -> str:
+    """Every option's chance of winning the week, side by side."""
+    text = f"win {decision.p_win_lock:.0%} if locked / {decision.p_win_roll:.0%} if rolled"
+    if decision.p_win_stand_in is not None and starter.stand_in is not None:
+        a = starter.stand_in
+        text += f" / {decision.p_win_stand_in:.0%} starting {a.bench.name} {_day(a.bench.next_game)[:3]}"
+    return text
+
+
+def call_headline(starter: Starter, decision: Decision) -> str:
+    """The one instruction for this slot."""
+    if decision.call == "stand_in" and starter.stand_in is not None:
+        a = starter.stand_in
+        back = (f"keep {a.bench.name} in" if a.keep_bench
+                else f"put {starter.name} back before {_when(starter.next_tip, starter.next_game)}")
+        return (f"START {a.bench.name} at {slot_position(a.slot)} for his "
+                f"{_when(a.bench.next_tip, a.bench.next_game)} game instead of {starter.name}: lock "
+                f"{a.bench.name} at {a.lock_at:.1f}+, otherwise {back} (gives up the {decision.pending:g} "
+                f"{starter.name} is showing)")
+    return f"{decision.call.upper()} {starter.name}"
+
+
+def decision_deadline(starter: Starter, decision: Decision) -> tuple[datetime | None, date | None]:
+    """A stand-in has to be set before the bench player's game; anything else before his own."""
+    if decision.call == "stand_in" and starter.stand_in is not None:
+        return starter.stand_in.bench.next_tip, starter.stand_in.bench.next_game
+    return starter.next_tip, starter.next_game
+
+
+def decision_why(starter: Starter, decision: Decision) -> str:
+    why = (f"counting {decision.pending:g}; rolling on is worth {decision.threshold:.1f} on expected points")
+    if decision.stand_in_expected is not None and starter.stand_in is not None:
+        why += f", starting {starter.stand_in.bench.name} first {decision.stand_in_expected:.1f}"
+    why += f"; {win_chances(starter, decision)}"
     if decision.matchup_changed_it:
         why += " -- the matchup overrides the expected-points call"
-    return f"  {deadline(starter):18} {call:5} {starter.name:24} {why}"
+    return why
+
+
+def decision_line(starter: Starter, decision: Decision) -> str:
+    when = _when(*decision_deadline(starter, decision))
+    return f"  {when:18} {call_headline(starter, decision)}\n  {'':18} {decision_why(starter, decision)}"
 
 
 def render(week: int, my_name: str, their_name: str, mine: list[Starter], theirs: list[Starter],
@@ -448,7 +486,8 @@ def render(week: int, my_name: str, their_name: str, mine: list[Starter], theirs
             lines.append("  AUDITIONS -- a bench player who plays first, for one game:")
             lines += [f"  !! {line}" for line in lineup.audition_lines()]
         else:
-            lines.append("  no bench player plays before a starter he could stand in for, with a gain")
+            lines.append("  no other bench player plays before a starter he could stand in for, with a gain "
+                         "(stand-ins for starters with a lock decision are weighed in that decision)")
     if moves is not None:
         priority = f" (you are #{moves.waiver_position} in waiver priority)" if moves.waiver_position else ""
         lines.append(f"\nROSTER MOVES{priority}")
@@ -605,6 +644,32 @@ class LineupReport:
         if self.plan.to_bench:
             out.append("to the bench: " + ", ".join(p.name for p in self.plan.to_bench))
         return out
+
+
+def attach_stand_ins(mine: list[Starter], auditions: list[Audition]) -> list[Audition]:
+    """Hand each audition whose starter has an open lock decision to that starter, to be
+    weighed in the decision; return the auditions left to show on their own."""
+    left = []
+    for a in auditions:
+        starter = next((s for s in mine if s.player_id == a.starter.player_id
+                        and s.slot is not None and s.slot.decision_open), None)
+        if starter is None:
+            left.append(a)
+        else:
+            starter.stand_in = a
+    return left
+
+
+def stand_in_for(starter: Starter) -> StandIn | None:
+    """The simulation's version of ``starter.stand_in``: the bench player's next game, then the
+    starter back with nothing pending (or the bench player on, when his games are worth more)."""
+    a = starter.stand_in
+    if a is None or a.bench.sim is None or starter.slot is None:
+        return None
+    bench = a.bench.sim
+    then = (Slot(a.bench.name, bench.distribution, bench.remaining_p_play[1:]) if a.keep_bench
+            else Slot(starter.name, starter.slot.distribution, starter.slot.remaining_p_play))
+    return StandIn(bench, a.lock_at, then, a.value)
 
 
 def lineup_after(plan: LineupPlan, slots: list[str], mine: list[Starter],
@@ -894,13 +959,9 @@ def run(args: argparse.Namespace) -> int:
     my_slots = [s.slot for s in mine]
     their_slots = [s.slot for s in theirs]
     odds, decisions = None, []
-    if all(slot is not None for slot in my_slots + their_slots):
+    simulable = all(slot is not None for slot in my_slots + their_slots)
+    if simulable:
         odds = win_probability(my_slots, their_slots, args.sims, SEED)
-        for index, starter in enumerate(mine):
-            if starter.slot.decision_open:
-                decisions.append((starter, decide(my_slots, their_slots, index, args.sims, SEED)))
-        decisions.sort(key=lambda pair: (pair[0].next_tip or datetime.max.replace(tzinfo=timezone.utc),
-                                         pair[0].next_game or date.max, pair[0].name))
 
     # Lineup changes for the rest of the week. An injured starter's swap alert is dropped when
     # the plan already benches him -- one instruction, not two.
@@ -908,6 +969,18 @@ def run(args: argparse.Namespace) -> int:
     start_options, bench_options = lineup_options(mine, bench, players)
     plan = plan_lineup(slots, start_options, bench_options)
     lineup = LineupReport(plan, auditions=plan_auditions(plan, bench_options))
+
+    # One decision per slot: a stand-in for a starter with an open decision is weighed against
+    # locking and rolling him in the same simulation, and the audition line goes -- the report
+    # must not say "lock him" and "start someone in his place" at once (user, 2026-11-05).
+    if simulable:
+        lineup.auditions = attach_stand_ins(mine, lineup.auditions)
+        for index, starter in enumerate(mine):
+            if starter.slot.decision_open:
+                decisions.append((starter, decide(my_slots, their_slots, index, args.sims, SEED,
+                                                  stand_in=stand_in_for(starter))))
+        decisions.sort(key=lambda pair: (decision_deadline(*pair)[0] or datetime.max.replace(tzinfo=timezone.utc),
+                                         decision_deadline(*pair)[1] or date.max, pair[0].name))
     if plan.changes and odds is not None:
         lineup.p_win_before = odds.p_win
         lineup.p_win_after = win_probability(lineup_after(plan, slots, mine, bench), their_slots,
@@ -923,7 +996,7 @@ def run(args: argparse.Namespace) -> int:
                  swaps, lineup))
 
     if args.post:
-        due_today = [d for d in decisions if d[0].next_game == today]
+        due_today = [d for d in decisions if decision_deadline(*d)[1] == today]
         change_due = (any(c.deadline[1] == today for c in plan.changes)
                       or any(a.bench.next_game == today for a in lineup.auditions))
         if args.only_if_due_today and not due_today and not change_due:

@@ -8,8 +8,11 @@ bank them. So the nightly call is made here, by simulation:
 * every starting slot of both teams is simulated through the rest of the week, each player
   following the expected-value threshold policy from ``lockin.lock_threshold``;
 * for one of my players with an open decision (a finished game, not yet locked, more games to
-  come), the week is simulated twice -- forced LOCK and forced ROLL -- and the call is
-  whichever wins more often.
+  come), the week is simulated once per option -- forced LOCK, forced ROLL and, when a bench
+  player plays before him, STAND-IN (bench him for that one game; see ``StandIn``) -- and the
+  call is whichever wins most often. One decision per slot, so the report can never say "lock
+  him" and "start someone else in his place" at once (the user caught exactly that on
+  2026-11-05: LOCK LeBron 40, and start Jalen Green in his slot on Thursday).
 
 Both runs use **common random numbers**: each slot draws from its own seeded stream, so forcing
 one slot leaves every other slot's week identical and the difference is all signal. When even
@@ -31,6 +34,7 @@ from engine.model.lockin import ScoreDistribution, lock_threshold
 
 DEFAULT_SIMS = 20_000
 Force = Literal["lock", "roll"]
+Call = Literal["lock", "roll", "stand_in"]
 
 
 class SampleableDistribution(ScoreDistribution, Protocol):
@@ -95,8 +99,34 @@ def policy_lock(distribution: ScoreDistribution, completed_scores: Sequence[floa
     return None
 
 
-def slot_outcomes(slot: Slot, rng: np.random.Generator, n_sims: int, force: Force | None = None) -> np.ndarray:
+@dataclass(frozen=True)
+class StandIn:
+    """Bench the starter for one game and start a bench player whose game comes first.
+
+    Benching him gives up his pending score. After the bench player's game: lock his score if
+    it is ``lock_at`` or more, otherwise the slot carries on as ``then`` -- the starter back for
+    his games left, with nothing pending (or the bench player's own games left, when those are
+    worth more). ``expected`` is the plan's expected score (``lineup_moves.audition_value``)."""
+
+    bench: Slot
+    lock_at: float
+    then: Slot
+    expected: float
+
+
+def stand_in_outcomes(stand_in: StandIn, rng: np.random.Generator, n_sims: int) -> np.ndarray:
+    first = stand_in.bench.remaining_p_play[0]
+    plays = rng.random(n_sims) < first
+    scores = np.where(plays, stand_in.bench.distribution.sample(rng, n_sims), 0.0)  # type: ignore[union-attr]
+    carry = slot_outcomes(stand_in.then, rng, n_sims)
+    return np.where(plays & (scores >= stand_in.lock_at), scores, carry)
+
+
+def slot_outcomes(slot: Slot, rng: np.random.Generator, n_sims: int,
+                  force: Force | StandIn | None = None) -> np.ndarray:
     """The score this slot ends the week with, in each of ``n_sims`` simulated weeks."""
+    if isinstance(force, StandIn):
+        return stand_in_outcomes(force, rng, n_sims)
     if slot.locked is not None:
         return np.full(n_sims, slot.locked)
     remaining = slot.remaining_p_play
@@ -129,7 +159,7 @@ def slot_outcomes(slot: Slot, rng: np.random.Generator, n_sims: int, force: Forc
 
 
 def team_outcomes(
-    slots: Sequence[Slot], n_sims: int, seed: int, team: int, force: dict[int, Force] | None = None
+    slots: Sequence[Slot], n_sims: int, seed: int, team: int, force: dict[int, Force | StandIn] | None = None
 ) -> np.ndarray:
     """Team totals per simulated week. Each slot has its own random stream (common random
     numbers), keyed by ``(seed, team, slot index)``."""
@@ -177,11 +207,13 @@ class Decision:
     slot: str
     pending: float
     threshold: float          # the expected-value threshold for this decision
-    ev_call: Force            # what maximising his expected score says
+    ev_call: Call             # what maximising his expected score says
     p_win_lock: float
     p_win_roll: float
-    standard_error: float     # of p_win_lock - p_win_roll, paired
-    call: Force               # what maximising the chance of winning the week says
+    standard_error: float     # of the chosen call's win chance minus the expected-points call's, paired
+    call: Call                # what maximising the chance of winning the week says
+    p_win_stand_in: float | None = None  # None: no bench player plays before him
+    stand_in_expected: float | None = None
 
     @property
     def matchup_changed_it(self) -> bool:
@@ -189,23 +221,34 @@ class Decision:
 
 
 def decide(
-    mine: Sequence[Slot], theirs: Sequence[Slot], index: int, n_sims: int = DEFAULT_SIMS, seed: int = 0
+    mine: Sequence[Slot], theirs: Sequence[Slot], index: int, n_sims: int = DEFAULT_SIMS, seed: int = 0,
+    stand_in: StandIn | None = None,
 ) -> Decision:
-    """LOCK or ROLL for ``mine[index]``, by the chance of winning the week."""
+    """LOCK, ROLL or STAND-IN for ``mine[index]``, by the chance of winning the week.
+
+    The expected-points call is whichever option has the highest expected score (lock: the
+    pending score; roll: the threshold, which is the value of his games left; stand-in: its
+    ``expected``). The matchup overrides it only when the best option's win chance beats the
+    expected-points call's by more than two standard errors (paired, common random numbers)."""
     slot = mine[index]
     if not slot.decision_open:
         raise ValueError(f"{slot.name}: no open decision")
     threshold = slot.threshold(len(slot.remaining_p_play))
-    ev_call: Force = "lock" if slot.pending >= threshold else "roll"  # type: ignore[operator]
+    expected: dict[Call, float] = {"lock": float(slot.pending), "roll": threshold}  # type: ignore[arg-type]
+    forces: dict[Call, Force | StandIn] = {"lock": "lock", "roll": "roll"}
+    if stand_in is not None:
+        expected["stand_in"] = stand_in.expected
+        forces["stand_in"] = stand_in
+    ev_call: Call = max(expected, key=lambda c: expected[c])  # ties go to lock, listed first
     their_totals = team_outcomes(theirs, n_sims, seed, team=1)
-    wins = {
-        force: _wins(team_outcomes(mine, n_sims, seed, team=0, force={index: force}), their_totals)
-        for force in ("lock", "roll")
-    }
-    difference = wins["lock"] - wins["roll"]
-    standard_error = float(difference.std(ddof=1) / np.sqrt(n_sims))
-    gap = float(difference.mean())
+    wins = {c: _wins(team_outcomes(mine, n_sims, seed, team=0, force={index: f}), their_totals)
+            for c, f in forces.items()}
+    best: Call = max(wins, key=lambda c: wins[c].mean())
+    difference = wins[best] - wins[ev_call]
+    standard_error = float(difference.std(ddof=1) / np.sqrt(n_sims)) if best != ev_call else 0.0
     # <=, so a call that cannot change the result (gap and error both 0) keeps the EV call.
-    call: Force = ev_call if abs(gap) <= 2 * standard_error else ("lock" if gap > 0 else "roll")
+    call: Call = ev_call if float(difference.mean()) <= 2 * standard_error else best
     return Decision(slot.name, float(slot.pending), threshold, ev_call,  # type: ignore[arg-type]
-                    float(wins["lock"].mean()), float(wins["roll"].mean()), standard_error, call)
+                    float(wins["lock"].mean()), float(wins["roll"].mean()), standard_error, call,
+                    float(wins["stand_in"].mean()) if stand_in is not None else None,
+                    stand_in.expected if stand_in is not None else None)
