@@ -58,7 +58,7 @@ pushed.
 Everything runnable today, in the order you would use it:
 
 ```
-uv run pytest                                             # 455 tests, none need the network
+uv run pytest                                             # 458 tests, none need the network
 uv run python -m engine.jobs.verify_league                # config vs live Sleeper; exits 1 on drift
 uv run python -m engine.jobs.ingest_history [--force]     # LOCAL ONLY: logs + schedule -> parquet
 uv run python -m engine.jobs.build_board [--top 150]      # -> data/board/{board.csv,board.html,pool.csv}
@@ -76,7 +76,7 @@ uv run python -m engine.jobs.lock_feedback                             # check t
 
 Per-file test counts: scoring 89, distributions 39, lockin 37, nba_stats 26, lineup 25,
 player_ids 23, draft_sim 29, lock_sheet 17, rookies 15, valuation 11, draft_live 11,
-verify_league 8, runtime 4, matchup 17, locks 10, nightly 11, alerts 9, resolve_scoring 5, aging 7, roles 6, roster_moves 10, nightly_roster 6, trades 8, http_retry 5, lineup_moves 19, lock_feedback 9.
+verify_league 8, runtime 4, matchup 17, locks 10, nightly 11, alerts 12, resolve_scoring 5, aging 7, roles 6, roster_moves 10, nightly_roster 6, trades 8, http_retry 5, lineup_moves 19, lock_feedback 9.
 
 `data/` is gitignored and regenerable. **On a fresh checkout run `ingest_history` then
 `build_board` before anything else** -- the 2026-10-16 session started with no `data/` at all.
@@ -925,6 +925,17 @@ LeBron Sat 38.7 -> 34.0, Kyrie Fri 34.8 -> 30.6); starting nine week value 482.9
    stand-in's deadline is the bench player's tip. Live, Thu 11/5 at 94% to win: LeBron -> START
    Green Thu (45.0 expected vs roll 40.9 / lock 40; win 95/94/95), Durant -> LOCK 37.5 (96% vs
    Bey first 95%, roll 94%; points call was Bey). 5 tests; 4 mutations fail the suite.
+   **Following the stand-in exposed two more bugs (same day, Green in LeBron's slot):**
+   (1) the planner valued Green as playing out his week (40.2) and said to put LeBron (40.9)
+   back before Green's game -- undoing the plan. A starter with nothing pending whose next game
+   ends before an eligible bench player's now carries `SwapBack` (lock at the bench player's
+   value, else bring him in; worth `audition_value`), used by the planner, the simulation
+   (`matchup.win_probability/decide(plans=)`) and the report line; that bench player is
+   reserved (`nightly.unreserved`) so he cannot also stand in elsewhere. (2) Green's Wed 38, a
+   bench game, was treated as pending and got a lock message. Sleeper does not say who started
+   when, so `nightly.mark_moved_in` uses the channel: once a day has messages, a starter with an
+   unlocked game that day and no message was not in the lineup then -- nothing pending, no
+   message. A day with no messages yet proves nothing. 4 tests; 6 mutations fail the suite.
    **Why LOCK on a score under the threshold** (asked the same day): the points call for Durant
    37.5 and LeBron 40 was ROLL (rolling worth 40.1 / 40.9 -- Sleeper's Rotowire projections for
    those games, 40.7 and 37.5/46.0 if he plays, agree); LOCK came from the matchup override,

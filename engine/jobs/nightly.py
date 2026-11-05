@@ -62,7 +62,9 @@ from engine.model.lineup_moves import (
     Audition,
     LineupOption,
     LineupPlan,
+    audition_value,
     move_in_value,
+    plays_first,
     plan_auditions,
     plan_lineup,
     stay_value,
@@ -109,6 +111,26 @@ def reported_lock_days(path: Path, week: int) -> dict[str, date]:
             if entry.get("game")}
 
 
+def mark_moved_in(starter: Starter, posted: set[tuple[int, str, str]] | None, week: int) -> None:
+    """A starter who was on the bench for his latest game cannot lock it: Lock-In only counts
+    games a player starts. Sleeper does not say who started when, so the #daily-locks channel
+    is the record: once a day has been processed (messages posted for it), a starter with an
+    unlocked game that day and no message was not in the lineup then. A day with no messages
+    yet, or no channel, proves nothing and changes nothing."""
+    if posted is None or not starter.completed or starter.slot is None or starter.slot.locked is not None:
+        return
+    day = starter.completed[-1][0].isoformat()
+    processed = any(k[0] == week and k[1] == day for k in posted)
+    if not processed or (week, day, starter.player_id) in posted:
+        return
+    starter.moved_in_after = starter.completed[-1][0]
+    slot = starter.slot
+    starter.slot = Slot(slot.name, slot.distribution, slot.remaining_p_play)
+    starter.lock = LockStatus("no_game_yet", note=f"moved into the lineup after {starter.moved_in_after:%a}; "
+                                                  "his earlier games do not count")
+    starter.gap = ""
+
+
 def merge_feedback_locks(reported: dict[str, float], feedback: dict[str, FeedbackLock],
                          gaps: list[str]) -> dict[str, float]:
     """``state/locks.json`` plus the 🔒 reactions. Where both name a player and disagree, the
@@ -135,7 +157,8 @@ def feedback_candidates(week: int, mine: list["Starter"], slots: list[str],
     advice = {s.player_id: d for s, d in decisions}
     out = []
     for index, s in enumerate(mine):
-        if s.player_id == EMPTY_SLOT or not s.completed or not s.upcoming or s.in_progress:
+        if (s.player_id == EMPTY_SLOT or not s.completed or not s.upcoming or s.in_progress
+                or s.moved_in_after is not None):
             continue
         if s.lock is not None and s.lock.state == "locked":
             continue
@@ -196,6 +219,18 @@ def week_containing(games: list[ScheduledGame], today: date) -> int:
 # --- one starter ----------------------------------------------------------------------------
 
 
+@dataclass(frozen=True)
+class SwapBack:
+    """Plan for a starter who plays before a bench player: after his next game, lock him at
+    ``lock_at`` or more, otherwise bring ``bench`` in for his games left (user, 2026-11-05: the
+    report told him to undo the Jalen Green stand-in it had suggested, because it valued Green
+    as if he had to play out the week)."""
+
+    bench: LineupOption
+    lock_at: float
+    value: float
+
+
 @dataclass
 class Starter:
     player_id: str
@@ -213,6 +248,9 @@ class Starter:
 
     next_tip: datetime | None = None  # UTC, from ESPN
     stand_in: Audition | None = None  # a bench player who plays first, weighed in his decision
+    moved_in_after: date | None = None  # came off the bench after this day: earlier games never count
+    swap_back: "SwapBack | None" = None  # a bench player to bring in after his next game
+
 
     @property
     def next_game(self) -> date | None:
@@ -396,6 +434,10 @@ def starter_line(s: Starter) -> str:
     nxt = deadline(s) if s.next_tip else _day(s.next_game)
     if s.in_progress:
         return f"{s.name}: playing now"
+    if s.swap_back is not None:
+        b = s.swap_back.bench
+        return (f"{s.name}: next game {nxt} -- lock it if he scores {s.swap_back.lock_at:.1f}+, otherwise "
+                f"put {b.name} in before {_when(b.next_tip, b.next_game)}")
     if games_after == 0:
         return f"{s.name}: last game {nxt} -- it counts as is"
     return f"{s.name}: next game {nxt} -- lock it if he scores {s.slot.threshold(games_after):.1f}+"
@@ -578,9 +620,14 @@ def injury_swaps(mine: list[Starter], slots: list[str], bench: list[tuple[Starte
 
 
 def lineup_options(mine: list[Starter], bench: list[tuple[Starter, tuple[str, ...]]],
-                   players: dict) -> tuple[list[LineupOption | None], list[LineupOption]]:
+                   players: dict, slots: list[str] | None = None
+                   ) -> tuple[list[LineupOption | None], list[LineupOption]]:
     """The user's starters and bench as ``lineup_moves`` options: each one's value for the rest
-    of the week if he starts from now, and whether he can be moved at all."""
+    of the week if he starts from now, and whether he can be moved at all.
+
+    With ``slots``, a starter with nothing pending whose next game is over before an eligible
+    bench player's is also worth the plan "play him, lock him at the line, else bring the bench
+    player in" (``SwapBack``, set on the starter) when that beats playing out his week."""
     def positions_of(pid: str) -> tuple[str, ...]:
         player = players.get(pid)
         return tuple((player.fantasy_positions or []) if player else [])
@@ -609,7 +656,7 @@ def lineup_options(mine: list[Starter], bench: list[tuple[Starter, tuple[str, ..
             starters.append(LineupOption(**base, value=value or 0.0, movable=False, fixed_reason=reason))
         else:
             starters.append(LineupOption(**base, value=stay_value(s.slot), sim=s.slot))
-    options = []
+    options: list[LineupOption] = []
     for candidate, positions in bench:
         slot = candidate.slot
         if candidate.in_progress or slot is None or (slot.remaining_p_play and slot.distribution is None):
@@ -619,7 +666,42 @@ def lineup_options(mine: list[Starter], bench: list[tuple[Starter, tuple[str, ..
         options.append(LineupOption(candidate.player_id, candidate.name, positions, move_in_value(fresh),
                                     next_game=candidate.next_game, next_tip=candidate.next_tip,
                                     days=days(candidate), sim=fresh))
+    if slots is not None:
+        for index, (s, option) in enumerate(zip(mine, starters)):
+            if option is None or not option.movable or s.slot is None or s.slot.pending is not None:
+                continue
+            later = [b for b in options if b.sim is not None and b.sim.remaining_p_play
+                     and is_eligible(b.positions, slots[index]) and plays_first(option, b)]
+            if not later or not s.slot.remaining_p_play:
+                continue
+            best = max(later, key=lambda b: b.value)
+            rest = s.slot.remaining_p_play[1:]
+            own_rest = weekly_value(s.slot.distribution, len(rest), rest) if rest else 0.0  # type: ignore[arg-type]
+            if best.value <= own_rest:
+                continue  # he would play out his week anyway
+            value = audition_value(Slot(s.name, s.slot.distribution, s.slot.remaining_p_play), best.value)
+            if value > option.value:
+                s.swap_back = SwapBack(best, best.value, value)
+                starters[index] = LineupOption(**{**option.__dict__, "value": value})
     return starters, options
+
+
+def unreserved(mine: list[Starter], bench: list[LineupOption]) -> list[LineupOption]:
+    """Bench players free to audition: one already planned to come in after a starter's game is
+    spoken for -- he cannot also stand in for someone else."""
+    reserved = {s.swap_back.bench.player_id for s in mine if s.swap_back is not None}
+    return [b for b in bench if b.player_id not in reserved]
+
+
+def swap_back_plans(mine: list[Starter]) -> dict[int, StandIn]:
+    """The simulation's version of each starter's ``SwapBack``: his next game, then the bench
+    player's games left."""
+    plans = {}
+    for index, s in enumerate(mine):
+        if s.swap_back is not None and s.slot is not None and s.swap_back.bench.sim is not None:
+            first = Slot(s.name, s.slot.distribution, s.slot.remaining_p_play[:1])
+            plans[index] = StandIn(first, s.swap_back.lock_at, s.swap_back.bench.sim, s.swap_back.value)
+    return plans
 
 
 @dataclass
@@ -913,6 +995,8 @@ def run(args: argparse.Namespace) -> int:
                                         mine=m.roster_id == roster.roster_id,
                                         reported_lock=reported.get(player_id),
                                         reported_on=reported_on.get(player_id))
+                if m.roster_id == roster.roster_id and player_id not in reported:
+                    mark_moved_in(starter, posted, week)
                 if starter.gap:
                     gaps.append(f"{owners[m.roster_id]}: {starter.name}: {starter.gap}")
                 built.append(starter)
@@ -960,15 +1044,16 @@ def run(args: argparse.Namespace) -> int:
     their_slots = [s.slot for s in theirs]
     odds, decisions = None, []
     simulable = all(slot is not None for slot in my_slots + their_slots)
-    if simulable:
-        odds = win_probability(my_slots, their_slots, args.sims, SEED)
 
     # Lineup changes for the rest of the week. An injured starter's swap alert is dropped when
     # the plan already benches him -- one instruction, not two.
     slots = starting_slots(config["roster_positions"])
-    start_options, bench_options = lineup_options(mine, bench, players)
+    start_options, bench_options = lineup_options(mine, bench, players, slots)
+    plans = swap_back_plans(mine)
+    if simulable:
+        odds = win_probability(my_slots, their_slots, args.sims, SEED, plans=plans)
     plan = plan_lineup(slots, start_options, bench_options)
-    lineup = LineupReport(plan, auditions=plan_auditions(plan, bench_options))
+    lineup = LineupReport(plan, auditions=plan_auditions(plan, unreserved(mine, bench_options)))
 
     # One decision per slot: a stand-in for a starter with an open decision is weighed against
     # locking and rolling him in the same simulation, and the audition line goes -- the report
@@ -978,7 +1063,7 @@ def run(args: argparse.Namespace) -> int:
         for index, starter in enumerate(mine):
             if starter.slot.decision_open:
                 decisions.append((starter, decide(my_slots, their_slots, index, args.sims, SEED,
-                                                  stand_in=stand_in_for(starter))))
+                                                  stand_in=stand_in_for(starter), plans=plans)))
         decisions.sort(key=lambda pair: (decision_deadline(*pair)[0] or datetime.max.replace(tzinfo=timezone.utc),
                                          decision_deadline(*pair)[1] or date.max, pair[0].name))
     if plan.changes and odds is not None:

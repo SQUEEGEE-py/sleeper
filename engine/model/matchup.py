@@ -187,9 +187,12 @@ def _wins(mine: np.ndarray, theirs: np.ndarray) -> np.ndarray:
 
 
 def win_probability(
-    mine: Sequence[Slot], theirs: Sequence[Slot], n_sims: int = DEFAULT_SIMS, seed: int = 0
+    mine: Sequence[Slot], theirs: Sequence[Slot], n_sims: int = DEFAULT_SIMS, seed: int = 0,
+    plans: dict[int, StandIn] | None = None,
 ) -> Odds:
-    my_totals = team_outcomes(mine, n_sims, seed, team=0)
+    """``plans``: my slots that follow a planned swap rather than their own threshold policy
+    (a starter who plays first, with a bench player to bring in after his game)."""
+    my_totals = team_outcomes(mine, n_sims, seed, team=0, force=dict(plans or {}))
     their_totals = team_outcomes(theirs, n_sims, seed, team=1)
     margin = my_totals - their_totals
     return Odds(
@@ -222,7 +225,7 @@ class Decision:
 
 def decide(
     mine: Sequence[Slot], theirs: Sequence[Slot], index: int, n_sims: int = DEFAULT_SIMS, seed: int = 0,
-    stand_in: StandIn | None = None,
+    stand_in: StandIn | None = None, plans: dict[int, StandIn] | None = None,
 ) -> Decision:
     """LOCK, ROLL or STAND-IN for ``mine[index]``, by the chance of winning the week.
 
@@ -241,7 +244,8 @@ def decide(
         forces["stand_in"] = stand_in
     ev_call: Call = max(expected, key=lambda c: expected[c])  # ties go to lock, listed first
     their_totals = team_outcomes(theirs, n_sims, seed, team=1)
-    wins = {c: _wins(team_outcomes(mine, n_sims, seed, team=0, force={index: f}), their_totals)
+    wins = {c: _wins(team_outcomes(mine, n_sims, seed, team=0, force={**(plans or {}), index: f}),
+                     their_totals)
             for c, f in forces.items()}
     best: Call = max(wins, key=lambda c: wins[c].mean())
     difference = wins[best] - wins[ev_call]
