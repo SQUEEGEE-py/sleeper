@@ -126,11 +126,13 @@ def test_feedback_candidates() -> None:
         starter("6", "Playing now", [(MON, 33.0)], in_progress=True),
         starter("7", "No game yet", []),
         starter("8", "Next game tipped", [(MON, 52.0)]),
+        starter("10", "Moved in from the bench", [(MON, 61.0)]),
     ]
-    mine[-1].next_tip = datetime(2026, 11, 4, 23, 0, tzinfo=timezone.utc)
+    mine[-1].moved_in_after = MON  # his Monday was a bench game: nothing to lock
+    mine[-2].next_tip = datetime(2026, 11, 4, 23, 0, tzinfo=timezone.utc)
     mine[0].next_tip = datetime(2026, 11, 5, 0, 30, tzinfo=timezone.utc)
     d = Decision("Open Mon", 50.0, 48.0, "lock", 0.74, 0.70, 0.004, "lock")
-    got = feedback_candidates(3, mine, slots + ["G#2"], final, [(mine[0], d)],
+    got = feedback_candidates(3, mine, slots + ["G#2", "F#2"], final, [(mine[0], d)],
                               now=datetime(2026, 11, 4, 23, 5, tzinfo=timezone.utc))
     assert [(c.player_id, c.slot, c.score, c.game_date) for c in got] == [("1", "PG#1", 50.0, MON)]
     assert got[0].advice.startswith("LOCK (win 74% if locked / 70% if rolled)")

@@ -142,3 +142,79 @@ def test_auditions_on_a_starter_with_a_decision_are_folded_into_it() -> None:
     left = attach_stand_ins([open_, fresh], [audition("1"), audition("2")])
     assert open_.stand_in is not None and fresh.stand_in is None
     assert [a.starter.player_id for a in left] == ["2"]  # no decision to weigh it in: shown alone
+
+
+def test_a_starter_moved_in_from_the_bench_has_nothing_pending() -> None:
+    # User, 2026-11-05: Jalen Green moved into LeBron's slot. His Wed 38 was a bench game, so it
+    # cannot be locked -- but the report advised on it and posted a lock message for it.
+    from engine.jobs.nightly import mark_moved_in
+    from engine.model.distributions import NormalScoreDistribution
+    from engine.model.matchup import Slot
+    n45 = NormalScoreDistribution(45.0, 10.0)
+    wed = date(2026, 11, 4)
+
+    def green() -> Starter:
+        return Starter("2309", "Jalen Green", "PHX", 32.5, completed=[(wed, 38.0)],
+                       slot=Slot("Green", n45, (0.75, 0.83), pending=38.0), gap="unclear")
+
+    processed = {(3, "2026-11-04", "1362"), (3, "2026-11-04", "1433")}  # Wed's messages, not Green
+    s = green()
+    mark_moved_in(s, processed, 3)
+    assert s.moved_in_after == wed and s.slot.pending is None and not s.slot.decision_open and not s.gap
+    # A day with no messages yet, a message for him, or no channel: nothing is assumed.
+    for posted in (set(), processed | {(3, "2026-11-04", "2309")}, None):
+        s = green()
+        mark_moved_in(s, posted, 3)
+        assert s.moved_in_after is None and s.slot.pending == 38.0
+
+
+def test_a_starter_who_plays_first_keeps_the_option_to_swap_a_bench_player_in() -> None:
+    # Green (Thu, Sat) in LeBron's slot, LeBron (Fri, Sun) on the bench. Valued as "play out
+    # his week", Green lost to LeBron and the report said to undo the stand-in.
+    from engine.jobs.lock_sheet import GameSlot
+    from engine.jobs.nightly import lineup_options, starter_line, swap_back_plans
+    from engine.model.distributions import NormalScoreDistribution
+    from engine.model.lineup_moves import plan_lineup
+    from engine.model.matchup import Slot
+    thu = GameSlot(date(2026, 11, 5), "ORL", True, True)
+    sat = GameSlot(date(2026, 11, 7), "HOU", False, False)
+    fri = GameSlot(date(2026, 11, 6), "CLE", True, False)
+    sun = GameSlot(date(2026, 11, 8), "CHI", False, False)
+    green = Starter("2309", "Jalen Green", "PHX", 0.0, upcoming=[thu, sat],
+                    slot=Slot("Green", NormalScoreDistribution(37.7, 16.5), (0.75, 0.83)))
+    green.next_tip = datetime(2026, 11, 6, 2, 0, tzinfo=timezone.utc)
+    lebron = Starter("1362", "LeBron James", "PHI", 0.0, upcoming=[fri, sun],
+                     slot=Slot("LeBron", NormalScoreDistribution(39.6, 11.7), (0.87, 0.87)))
+    lebron.next_tip = datetime(2026, 11, 7, 0, 30, tzinfo=timezone.utc)
+    class P:  # Sleeper player stand-in: positions only
+        def __init__(self, positions): self.fantasy_positions = positions
+    players = {"2309": P(["SG", "SF"]), "1362": P(["SF", "PF"])}
+    starters, bench = lineup_options([green], [(lebron, ("SF", "PF"))], players, ["SF#1"])
+    assert green.swap_back is not None and green.swap_back.bench.name == "LeBron James"
+    assert starters[0].value > bench[0].value  # so the plan keeps Green in
+    assert plan_lineup(["SF#1"], starters, bench).changes == []
+    assert green.swap_back.lock_at == bench[0].value
+    assert "otherwise put LeBron James in before Fri 7:30 PM ET" in starter_line(green)
+    assert set(swap_back_plans([green])) == {0}
+    from engine.jobs.nightly import unreserved
+    assert unreserved([green], bench) == []  # LeBron is spoken for: no audition elsewhere
+    # Without the slot list (or with no eligible later bench player), nothing changes.
+    plain = Starter("2309", "Jalen Green", "PHX", 0.0, upcoming=[thu, sat], slot=green.slot)
+    plain.next_tip = green.next_tip
+    lineup_options([plain], [(lebron, ("SF", "PF"))], players)
+    assert plain.swap_back is None
+
+
+def test_a_bench_player_who_plays_first_is_no_swap_back() -> None:
+    from engine.jobs.lock_sheet import GameSlot
+    from engine.jobs.nightly import lineup_options
+    from engine.model.distributions import NormalScoreDistribution
+    from engine.model.matchup import Slot
+    fri = GameSlot(date(2026, 11, 6), "CLE", True, False)
+    thu = GameSlot(date(2026, 11, 5), "ORL", True, False)
+    starter = Starter("1", "A", "PHI", 0.0, upcoming=[fri], slot=Slot("A", NormalScoreDistribution(30, 10), (0.9,)))
+    early = Starter("2", "B", "PHX", 0.0, upcoming=[thu], slot=Slot("B", NormalScoreDistribution(45, 10), (0.9,)))
+    class P:
+        fantasy_positions = ["SF"]
+    lineup_options([starter], [(early, ("SF",))], {"1": P(), "2": P()}, ["SF#1"])
+    assert starter.swap_back is None  # B's game is over before A's: that is an audition, not this
