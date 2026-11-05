@@ -3,6 +3,7 @@ network -- the Discord client runs against httpx.MockTransport."""
 
 from __future__ import annotations
 
+import json
 from datetime import date, datetime, timezone
 
 import httpx
@@ -64,26 +65,29 @@ def test_the_bots_own_seeded_reaction_is_not_a_lock() -> None:
     assert not lock_reacted(msg("1", BROWN))
 
 
-def test_locks_come_only_from_our_webhook_this_week_and_a_real_user() -> None:
+def test_a_lock_is_any_lock_emoji_on_our_message_this_week() -> None:
     wilson = Candidate(3, MON, "4862", "Caleb Wilson", "UTIL#1", 51.0)
     old = Candidate(2, date(2026, 10, 28), "1711", "Jaylen Brown", "F#1", 62.0)
     fake = Candidate(3, MON, "99", "Typed By Hand", "C#1", 70.0)
-    messages = [msg("a", BROWN), msg("b", wilson), msg("c", old), msg("d", fake, webhook_id=None),
-                msg("e", Candidate(3, MON, "8", "Bot Only", "G#1", 40.0))]
-    reactors = {"a": [{"id": ME}], "b": [{"id": "777"}], "c": [{"id": ME}], "d": [{"id": ME}],
-                "e": [{"id": "1", "bot": True}]}
-    locks, gaps = locks_from_messages(messages, 3, HOOK, reactors, user_id=None)
+    seeded = Candidate(3, MON, "8", "Bot Only", "G#1", 40.0)
+    rolled = Candidate(3, MON, "9", "Not Locked", "C#2", 30.0)
+    user = lock_reaction(1, me=False)
+    messages = [msg("a", BROWN, user), msg("b", wilson, user), msg("c", old, user),
+                msg("d", fake, user, webhook_id=None), msg("e", seeded, lock_reaction(1, me=True)),
+                msg("f", rolled)]
+    locks, gaps = locks_from_messages(messages, 3, HOOK)
     assert set(locks) == {"1711", "4862"} and not gaps
     assert locks["1711"] == FeedbackLock("1711", "Jaylen Brown", 59.5, MON, "F#1", "a")
-    # With the user's id set, a friend's 🔒 on Wilson does not count.
-    locks, _ = locks_from_messages(messages, 3, HOOK, reactors, user_id=ME)
+    # With the user's id set, only his 🔒 counts.
+    locks, _ = locks_from_messages(messages, 3, HOOK, {"a": [{"id": ME}], "b": [{"id": "777"}]}, user_id=ME)
     assert set(locks) == {"1711"}
 
 
 def test_two_locks_on_one_player_keep_the_first_and_say_so() -> None:
     later = Candidate(3, WED, "1711", "Jaylen Brown", "F#1", 61.0)
-    messages = [msg("b", later), msg("a", BROWN)]  # Discord lists newest first
-    locks, gaps = locks_from_messages(messages, 3, HOOK, {"a": [{"id": ME}], "b": [{"id": ME}]}, ME)
+    user = lock_reaction(1, me=False)
+    messages = [msg("b", later, user), msg("a", BROWN, user)]  # Discord lists newest first
+    locks, gaps = locks_from_messages(messages, 3, HOOK)
     assert locks["1711"].score == 59.5 and locks["1711"].game_date == MON
     assert len(gaps) == 1 and "two games" in gaps[0]
 
@@ -148,41 +152,42 @@ def test_lock_slot_gaps_and_merge() -> None:
     assert len(merge_gaps) == 1 and "using the file" in merge_gaps[0]
 
 
-def test_client_posts_seeds_the_lock_and_reads_reactions_back() -> None:
+def test_client_posts_without_reacting_and_clears_its_old_reactions() -> None:
     calls: list[tuple[str, str]] = []
     posted_body: dict = {}
 
     def handler(request: httpx.Request) -> httpx.Response:
-        calls.append((request.method, request.url.path))
         path = request.url.raw_path.decode()  # still percent-encoded, as sent
+        calls.append((request.method, path))
         if request.method == "GET" and path == "/api/webhooks/900/tok":
             assert "authorization" not in request.headers  # the webhook needs no bot token
             return httpx.Response(200, json={"id": HOOK, "channel_id": "42", "name": "locks"})
         if request.method == "POST" and path.startswith("/api/webhooks/900/tok"):
             assert request.url.params["wait"] == "true"
-            posted_body.update(__import__("json").loads(request.content))
+            posted_body.update(json.loads(request.content))
             return httpx.Response(200, json={"id": "m1"})
         assert request.headers["authorization"] == "Bot sekrit"
-        if request.method == "PUT":
-            assert path.endswith("/channels/42/messages/m1/reactions/%F0%9F%94%92/@me")
+        if request.method == "DELETE":
             return httpx.Response(204)
         if path.startswith("/api/v10/channels/42/messages?"):
             return httpx.Response(200, json=[
-                msg("m1", BROWN, lock_reaction(2, me=True)),
-                msg("m0", BROWN, lock_reaction(1, me=True)) | {"timestamp": "2026-10-20T08:00:00+00:00"},
+                msg("m2", Candidate(3, TUE, "4862", "Caleb Wilson", "UTIL#1", 51.0), lock_reaction(1, me=False)),
+                msg("m1", BROWN, lock_reaction(1, me=True)),  # only the bot's seed: not a lock
+                msg("m0", BROWN, lock_reaction(1, me=False)) | {"timestamp": "2026-10-20T08:00:00+00:00"},
             ])
-        if path.startswith("/api/v10/channels/42/messages/m1/reactions/%F0%9F%94%92?"):
-            return httpx.Response(200, json=[{"id": "1", "bot": True}, {"id": ME}])
         return httpx.Response(404)
 
-    client = LockFeedback("https://discord.com/api/webhooks/900/tok", "sekrit", ME,
+    client = LockFeedback("https://discord.com/api/webhooks/900/tok", "sekrit",
                           http=httpx.Client(transport=httpx.MockTransport(handler)))
     assert client.post(BROWN) == "m1"
     assert parse_tag(posted_body["content"]) == (3, MON, "1711", "F#1", 59.5)
     assert posted_body["allowed_mentions"] == {"parse": []}
+    assert not any(method == "PUT" for method, _ in calls)  # posting never reacts
 
     locks, gaps, posted = client.read_week(3, datetime(2026, 11, 2, 5, tzinfo=timezone.utc))
-    assert set(locks) == {"1711"} and locks["1711"].slot == "F#1" and not gaps
-    assert posted == {(3, "2026-11-02", "1711")}
-    # The message from before the week started was neither read for locks nor asked about.
+    assert set(locks) == {"4862"} and not gaps
+    assert posted == {(3, "2026-11-02", "1711"), (3, "2026-11-03", "4862")}
+    # The bot's own 🔒 on m1 is taken back; nothing before the week is touched.
+    deletes = [path for method, path in calls if method == "DELETE"]
+    assert deletes == ["/api/v10/channels/42/messages/m1/reactions/%F0%9F%94%92/@me"]
     assert not any("m0" in path for _, path in calls)

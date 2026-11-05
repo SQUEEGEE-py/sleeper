@@ -9,9 +9,10 @@ user. Before this he edited ``state/locks.json`` and pushed; now:
    was that day, who still has games left this week (a final game counts by itself) and who is
    not already locked: his name, slot, score and the advisor's call. Each message ends in a
    small machine-readable tag (``lock w3 2026-11-02 1711 F#1 59.5``).
-2. The user reacts 🔒 on the ones he locked.
-3. Every later run reads this week's messages back, and a 🔒 from the user (not the bot) is a
-   lock at the tagged score, game and slot. ``state/locks.json`` still works and is merged in.
+2. The user reacts 🔒 on the ones he locked. The bot never reacts (user's call, 2026-11-05: a
+   🔒 on a message means he locked that player, nothing else).
+3. Every later run reads this week's messages back, and a 🔒 on one is a lock at the tagged
+   score, game and slot. ``state/locks.json`` still works and is merged in.
 
 The channel is the state: nothing is stored in the repo, and posting is idempotent (a message
 already in the channel for that week, day and player is not posted again), so a late,
@@ -19,8 +20,7 @@ repeated or push-triggered run is harmless.
 
 Why a bot as well as a webhook (decided 2026-11-05): a webhook can post, but cannot list a
 channel, so it could only read back messages whose ids were stored somewhere between runs. A
-bot token can list the channel and see who reacted, so a friend's 🔒 or the bot's own does not
-count. Posting stays on the webhook, because a bot must open a gateway connection once before
+bot token can list the channel and read its reactions. Posting stays on the webhook, because a bot must open a gateway connection once before
 Discord lets it post, and Actions runs are plain HTTP.
 
 Secrets (``.env`` locally, repository secrets in Actions), all optional -- without the first
@@ -28,11 +28,12 @@ two the feature is off and the report says so:
 
 * ``DISCORD_LOCKS_WEBHOOK_URL`` -- a webhook in ``#daily-locks``. Its channel id comes from the
   webhook itself.
-* ``DISCORD_BOT_TOKEN`` -- a bot in the same server with View Channel, Read Message History and
-  Add Reactions there, and the **Message Content** intent switched on (without it Discord
+* ``DISCORD_BOT_TOKEN`` -- a bot in the same server with View Channel and Read Message History
+  there (plus Add Reactions, only to clear the 🔒 it seeded on the first day), and the **Message Content** intent switched on (without it Discord
   returns webhook messages with empty content; that is detected and fails loudly, never read
   as "no locks").
-* ``DISCORD_LOCKS_USER_ID`` -- the user's Discord user id. When set, only his 🔒 counts.
+* ``DISCORD_LOCKS_USER_ID`` -- the user's Discord user id. When set, only his 🔒 counts. Unset
+  (the user's channel is private to him), any 🔒 but the bot's own counts.
 
     uv run python -m engine.jobs.lock_feedback          # check the setup; shows recent 🔒 reactions
 """
@@ -124,7 +125,8 @@ def _name_from(content: str) -> str:
 
 
 def lock_reacted(message: dict) -> bool:
-    """Did anyone but the bot react 🔒? (``me`` is the bot's own pre-seeded reaction.)"""
+    """Is there a 🔒 on it? The bot's own (``me``; it seeded them on 2026-11-05 only, and
+    ``read_week`` removes them) never counts."""
     for reaction in message.get("reactions") or []:
         if (reaction.get("emoji") or {}).get("name") == LOCK_EMOJI:
             return int(reaction.get("count") or 0) - (1 if reaction.get("me") else 0) > 0
@@ -143,11 +145,11 @@ def posted_keys(messages: Iterable[dict], webhook_id: str) -> set[tuple[int, str
 
 
 def locks_from_messages(messages: Iterable[dict], week: int, webhook_id: str,
-                        reactors: dict[str, list[dict]], user_id: str | None
+                        reactors: dict[str, list[dict]] | None = None, user_id: str | None = None
                         ) -> tuple[dict[str, FeedbackLock], list[str]]:
-    """This week's locks from the channel. ``reactors``: message id -> the users who reacted
-    🔒 (fetched only for messages ``lock_reacted`` says have one). Bots never count; with
-    ``user_id`` set, only that user does. A message from our webhook with no content means the
+    """This week's locks from the channel: any message of ours with a 🔒 on it. With
+    ``user_id`` set, the 🔒 must be that user's -- ``reactors`` maps message id -> the users who
+    reacted (fetched only then, only where ``lock_reacted``). A message from our webhook with no content means the
     bot cannot read content -- that raises, because reading it as "no locks" would be a
     silently invented answer."""
     locks: dict[str, FeedbackLock] = {}
@@ -162,10 +164,9 @@ def locks_from_messages(messages: Iterable[dict], week: int, webhook_id: str,
         parsed = parse_tag(content)
         if parsed is None or parsed[0] != week:
             continue
-        users = [u for u in reactors.get(m["id"], []) if not u.get("bot")]
-        if user_id:
-            users = [u for u in users if u.get("id") == user_id]
-        if not users:
+        if not lock_reacted(m):
+            continue
+        if user_id and not any(u.get("id") == user_id for u in (reactors or {}).get(m["id"], [])):
             continue
         _, day, pid, slot, score = parsed
         lock = FeedbackLock(pid, _name_from(content) or pid, score, day, slot, m["id"])
@@ -247,22 +248,36 @@ class LockFeedback:
                   ) -> tuple[dict[str, FeedbackLock], list[str], set[tuple[int, str, str]]]:
         """This week's locks, any gaps, and the (week, day, player) keys already posted."""
         messages = self.messages_since(since)
-        reactors = {m["id"]: self._reactors(m["id"]) for m in messages
-                    if m.get("webhook_id") == self.webhook_id and lock_reacted(m)}
+        ours = [m for m in messages if m.get("webhook_id") == self.webhook_id]
+        self.remove_own_reactions(ours)
+        reactors = ({m["id"]: self._reactors(m["id"]) for m in ours if lock_reacted(m)}
+                    if self.user_id else None)
         locks, gaps = locks_from_messages(messages, week, self.webhook_id, reactors, self.user_id)
         return locks, gaps, posted_keys(messages, self.webhook_id)
 
+    def remove_own_reactions(self, messages: Iterable[dict]) -> int:
+        """Take back any 🔒 the bot added itself (it seeded them on 2026-11-05), so the only
+        reactions in the channel are the user's. Best effort: a failure costs nothing, since
+        the bot's own reaction never counts as a lock anyway."""
+        removed = 0
+        for m in messages:
+            if not any((r.get("emoji") or {}).get("name") == LOCK_EMOJI and r.get("me")
+                       for r in m.get("reactions") or []):
+                continue
+            try:
+                request_with_retry(lambda m=m: self._http.delete(
+                    f"{API}/channels/{self.channel_id}/messages/{m['id']}/reactions/{quote(LOCK_EMOJI)}/@me",
+                    headers=self._bot))
+                removed += 1
+            except httpx.HTTPError as error:
+                print(f"lock feedback: could not remove the bot's own {LOCK_EMOJI} ({error})", file=sys.stderr)
+        return removed
+
     def post(self, c: Candidate) -> str:
-        """Post one candidate; pre-seed a 🔒 so the user only has to tap it. Returns the id."""
+        """Post one candidate, with no reaction: the user adds 🔒 himself. Returns the id."""
         body = {"content": format_message(c), "allowed_mentions": {"parse": []}}
         message = request_with_retry(lambda: self._http.post(
             self.webhook_url, params={"wait": "true"}, json=body, headers={"User-Agent": USER_AGENT})).json()
-        try:  # a missing Add Reactions permission costs one tap, not the run
-            request_with_retry(lambda: self._http.put(
-                f"{API}/channels/{self.channel_id}/messages/{message['id']}/reactions/{quote(LOCK_EMOJI)}/@me",
-                headers=self._bot))
-        except httpx.HTTPError as error:
-            print(f"lock feedback: could not pre-add {LOCK_EMOJI} ({error}); react by hand", file=sys.stderr)
         return str(message["id"])
 
 
@@ -294,7 +309,7 @@ TEST_WEEK = 0  # no fantasy week is 0, so a test message can never count as a re
 
 
 def post_test(feedback: LockFeedback) -> int:
-    """Post a week-0 test message through the webhook, seed 🔒 with the bot, read it back."""
+    """Post a week-0 test message through the webhook and read it back with the bot."""
     c = Candidate(TEST_WEEK, date.today(), "test", "Lock feedback test", "UTIL#1", 0.0,
                   "this is a setup test -- react to it to check your reactions are read; it never counts")
     message_id = feedback.post(c)
@@ -306,11 +321,7 @@ def post_test(feedback: LockFeedback) -> int:
     if parse_tag(back["content"]) is None:
         print("FAIL: the tag did not survive the round trip")
         return 1
-    seeded = [r for r in back.get("reactions") or [] if (r.get("emoji") or {}).get("name") == LOCK_EMOJI]
-    if not seeded or not seeded[0].get("me"):
-        print(f"FAIL: the bot could not add {LOCK_EMOJI} -- give it Add Reactions in the channel")
-        return 1
-    print(f"OK: content readable, tag parsed, {LOCK_EMOJI} seeded by the bot")
+    print("OK: content readable, tag parsed")
     return 0
 
 
@@ -321,7 +332,7 @@ def main() -> int:
     load_dotenv()
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--post-test", action="store_true",
-                        help="also post a week-0 test message, seed the lock emoji and read it back")
+                        help="also post a week-0 test message and read it back")
     args = parser.parse_args()
     feedback = LockFeedback.from_env()
     if feedback is None:

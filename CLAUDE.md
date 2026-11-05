@@ -902,16 +902,19 @@ LeBron Sat 38.7 -> 34.0, Kyrie Fri 34.8 -> 30.6); starting nine week value 482.9
    message per starter whose latest game was that day, who played, still has games this week, is
    not locked and whose next tip has not passed: name, slot, score, the advisor's call, and a
    `-# lock w3 2026-11-02 1711 F#1 59.5` tag. The user reacts 🔒 on the ones he locked; every run
-   reads this week's messages back and a 🔒 from a non-bot (only `DISCORD_LOCKS_USER_ID` if set)
-   is a lock at that score, game and slot. The channel is the state; posting is idempotent by
+   reads this week's messages back and any 🔒 on one (only `DISCORD_LOCKS_USER_ID`'s, if set; the
+   channel is private to the user, so it is not) is a lock at that score, game and slot. **The bot
+   never reacts** (user's call, 2026-11-05, after the first day's posts carried a seeded 🔒); each
+   run removes any 🔒 of its own left from that day, and its own reaction never counts. The channel is the state; posting is idempotent by
    (week, day, player). **Posting is a webhook (`DISCORD_LOCKS_WEBHOOK_URL`), reading is a bot
    (`DISCORD_BOT_TOKEN`)**: a webhook cannot list a channel, and a bot cannot post over plain
    HTTP until it has opened a gateway connection once. The bot needs View Channel, Read Message
-   History, Add Reactions (it pre-seeds 🔒; its own reaction never counts) and the Message
-   Content intent -- empty content is an error, never "no locks". An unreadable channel is a gap
+   History and the Message Content intent -- empty content is an error, never "no locks". An unreadable channel is a gap
    and nothing is posted that run. A lock whose slot's position differs from Sleeper's lineup, or
    who is no longer starting, is a gap. **Not yet probed against live Discord (rule 6)**: run
    `python -m engine.jobs.lock_feedback` once the secrets exist. 9 tests; 5 mutations fail them.
+   **Probed 2026-11-05** (`lock_feedback_check.yml`, run 41966848717): token, webhook channel,
+   reading, Message Content all work; the first live run posted 7 messages for Wed 11/4.
    **Step 7 is done.** Open follow-ups from it: the late-season availability drop for weeks
    22-24 (above), and rebuilding current-season logs from Sleeper in the cloud so the
    snapshot refresh stops being a laptop chore.
