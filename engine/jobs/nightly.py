@@ -48,6 +48,8 @@ from engine.ingest.nba_stats import DATA_DIR, GAME_TYPE_REGULAR, previous_season
 from engine.ingest.sleeper import INJURY_STATUS_TTL_SECONDS, Matchup, Player, ScheduledGame, SleeperClient
 from engine.jobs.build_board import load_logs
 from engine.jobs.discord import WEBHOOK_ENV, post, webhook_url
+from engine.jobs.lock_feedback import LOCK_EMOJI, LOCKS_WEBHOOK_ENV, BOT_TOKEN_ENV, FeedbackLock, LockFeedback, to_post
+from engine.jobs.lock_feedback import Candidate as LockCandidate
 from engine.jobs.lock_sheet import GameSlot, games_p_play, my_roster, parse_birth_date, team_week_games
 from engine.jobs.runtime import log_exception, utf8_output
 from engine.model.locks import LockStatus, infer_lock
@@ -94,6 +96,74 @@ def reported_locks(path: Path, week: int) -> dict[str, float]:
     if data.get("week") != week:
         return {}
     return {pid: float(entry["score"]) for pid, entry in (data.get("locked") or {}).items()}
+
+
+def reported_lock_days(path: Path, week: int) -> dict[str, date]:
+    """The game each reported lock was on, where ``state/locks.json`` records it."""
+    if not path.exists():
+        return {}
+    data = json.loads(path.read_text(encoding="utf-8"))
+    if data.get("week") != week:
+        return {}
+    return {pid: date.fromisoformat(entry["game"]) for pid, entry in (data.get("locked") or {}).items()
+            if entry.get("game")}
+
+
+def merge_feedback_locks(reported: dict[str, float], feedback: dict[str, FeedbackLock],
+                         gaps: list[str]) -> dict[str, float]:
+    """``state/locks.json`` plus the 🔒 reactions. Where both name a player and disagree, the
+    file wins (it was typed on purpose) and the disagreement is shown."""
+    merged = dict(reported)
+    for pid, lock in feedback.items():
+        if pid in merged and abs(merged[pid] - lock.score) > 0.01:
+            gaps.append(f"{lock.name}: state/locks.json says locked at {merged[pid]:g}, Discord "
+                        f"{LOCK_EMOJI} says {lock.score:g} ({lock.game_date:%a}); using the file")
+            continue
+        merged[pid] = lock.score
+    return merged
+
+
+def feedback_candidates(week: int, mine: list["Starter"], slots: list[str],
+                        status_by_date: dict[str, set[str]],
+                        decisions: list[tuple["Starter", Decision]], now: datetime | None = None
+                        ) -> list[LockCandidate]:
+    """Starters to ask "did you lock him?" about: his latest finished game was on a day whose
+    games are all final, he played in it, his next game has not started, he has games left this
+    week (a final game counts by itself, nothing to ask) and he is not already locked. ``now``:
+    his next tip-off (ESPN) must still be ahead -- Sleeper's schedule can still say pre_game
+    after a game tips, and by then the lock window has closed."""
+    advice = {s.player_id: d for s, d in decisions}
+    out = []
+    for index, s in enumerate(mine):
+        if s.player_id == EMPTY_SLOT or not s.completed or not s.upcoming or s.in_progress:
+            continue
+        if s.lock is not None and s.lock.state == "locked":
+            continue
+        if now is not None and s.next_tip is not None and s.next_tip <= now:
+            continue
+        day, score = s.completed[-1]
+        if status_by_date.get(day.isoformat(), {"pre_game"}) != {"complete"} or day.isoformat() not in s.played:
+            continue
+        d = advice.get(s.player_id)
+        call = (f"{d.call.upper()} (win {d.p_win_lock:.0%} if locked / {d.p_win_roll:.0%} if rolled) "
+                f"-- before {deadline(s)}") if d else ""
+        out.append(LockCandidate(week, day, s.player_id, s.name, slots[index], score, call))
+    return out
+
+
+def lock_slot_gaps(mine: list["Starter"], slots: list[str], feedback: dict[str, FeedbackLock]) -> list[str]:
+    """A locked player stays in the slot he was locked in. Say so when Sleeper's lineup
+    disagrees with the slot recorded at the lock -- one of the two is wrong."""
+    where = {s.player_id: slots[i] for i, s in enumerate(mine)}
+    gaps = []
+    for pid, lock in feedback.items():
+        if pid not in where:
+            gaps.append(f"{lock.name}: you {LOCK_EMOJI} him at {slot_position(lock.slot)} "
+                        f"({lock.score:g}, {lock.game_date:%a}) but he is not in Sleeper's starting lineup")
+        elif slot_position(where[pid]) != slot_position(lock.slot):
+            gaps.append(f"{lock.name}: locked at {slot_position(lock.slot)} but Sleeper now has him at "
+                        f"{slot_position(where[pid])}")
+    return gaps
 DEFAULT_USERNAME = "Squ33gee"
 EMPTY_SLOT = "0"
 SEED = 20261020
@@ -138,6 +208,7 @@ class Starter:
     lock: LockStatus | None = None
     slot: Slot | None = None
     gap: str = ""
+    played: frozenset[str] = frozenset()  # dates (ISO) he has a box score for: a DNP has none
 
     next_tip: datetime | None = None  # UTC, from ESPN
 
@@ -150,13 +221,13 @@ def build_starter(
     player_id: str, counted: float, player: Player | None, schedule: pd.DataFrame,
     status: dict[tuple[str, str], str], scores_by_date: dict[str, float], week: int,
     distribution, base_p_play: float | None, mine: bool = True,
-    reported_lock: float | None = None,
+    reported_lock: float | None = None, reported_on: date | None = None,
 ) -> Starter:
     """Lock status and simulation slot for one starter. ``distribution`` is None when the
     player has no model; that is a gap only if he still has games to simulate."""
     name = (player.full_name if player else None) or player_id
     team = (player.team if player else None) or ""
-    starter = Starter(player_id, name, team, counted)
+    starter = Starter(player_id, name, team, counted, played=frozenset(scores_by_date))
     if not team:
         starter.gap = "no NBA team in Sleeper"
     else:
@@ -191,7 +262,7 @@ def build_starter(
 
     if reported_lock is not None and mine:
         # The user told us. Sleeper's own numbers cannot show a lock (state/locks.json).
-        starter.lock = LockStatus("locked", None, reported_lock, note="reported by you")
+        starter.lock = LockStatus("locked", reported_on, reported_lock, note="reported by you")
         starter.gap = ""
         starter.slot = Slot(name, distribution, remaining, locked=reported_lock)
         return starter
@@ -312,7 +383,8 @@ def starter_line(s: Starter) -> str:
     """Where a starter with no open decision stands -- so every slot is in the report."""
     lock = s.lock
     if lock is not None and lock.state == "locked":
-        return f"{s.name}: locked {lock.locked_score:g}"
+        on = f" ({lock.locked_on:%a})" if lock.locked_on else ""
+        return f"{s.name}: locked {lock.locked_score:g}{on}"
     if s.slot is None:
         return f"{s.name}: {s.gap or 'no model'}"
     if not s.upcoming:
@@ -708,6 +780,26 @@ def run(args: argparse.Namespace) -> int:
         games = client.get_nba_schedule(season_year)
         week = args.week or week_containing(games, today)
         reported = reported_locks(args.locks, week)
+        reported_on = reported_lock_days(args.locks, week)
+        feedback = LockFeedback.from_env()
+        feedback_locks: dict[str, FeedbackLock] = {}
+        posted: set | None = None  # None: the channel could not be read, so nothing is posted
+        if feedback is None:
+            if os.environ.get(LOCKS_WEBHOOK_ENV) or os.environ.get(BOT_TOKEN_ENV):
+                gaps.append(f"lock feedback needs both {LOCKS_WEBHOOK_ENV} and {BOT_TOKEN_ENV}; "
+                            "locks from state/locks.json only")
+        else:
+            week_start = min(date.fromisoformat(g.date) for g in games if g.week == week)
+            try:
+                feedback_locks, feedback_gaps, posted = feedback.read_week(
+                    week, datetime.combine(week_start, datetime.min.time(), EASTERN))
+                gaps += feedback_gaps
+            except Exception as error:
+                gaps.append(f"could not read the {LOCK_EMOJI} reactions in Discord ({type(error).__name__}: "
+                            f"{error}); locks from state/locks.json only, so a player you locked may be "
+                            "advised as open")
+            reported = merge_feedback_locks(reported, feedback_locks, gaps)
+            reported_on = {**{pid: lock.game_date for pid, lock in feedback_locks.items()}, **reported_on}
         roster = my_roster(client, league_id, args.user)
         matchups = client.get_matchups_live(league_id, week)
         users = {u.user_id: u.display_name for u in client.get_users(league_id)}
@@ -754,13 +846,15 @@ def run(args: argparse.Namespace) -> int:
                 starter = build_starter(player_id, float(counted), players.get(player_id), schedule,
                                         status, scores, week, distribution, base,
                                         mine=m.roster_id == roster.roster_id,
-                                        reported_lock=reported.get(player_id))
+                                        reported_lock=reported.get(player_id),
+                                        reported_on=reported_on.get(player_id))
                 if starter.gap:
                     gaps.append(f"{owners[m.roster_id]}: {starter.name}: {starter.gap}")
                 built.append(starter)
             return built
 
         mine, theirs = starters_of(mine_m), starters_of(theirs_m)
+        gaps += lock_slot_gaps(mine, starting_slots(config["roster_positions"]), feedback_locks)
         roles = role_watch(mine_m.model_extra.get("players") or [], pool, model, players, season_games)
         reserve_ids = set((roster.model_extra or {}).get("reserve") or [])
         bench = []
@@ -834,13 +928,25 @@ def run(args: argparse.Namespace) -> int:
                       or any(a.bench.next_game == today for a in lineup.auditions))
         if args.only_if_due_today and not due_today and not change_due:
             print("\nnot posted: no decision is due today")
-            return 0
-        shown = due_today if args.only_if_due_today else decisions
-        message = render_discord(week, their_name, mine, mine_m, theirs_m, odds, shown, gaps, roles, moves, trades,
-                                 swaps, lineup)
-        if args.reason:
-            message = rerun_banner(args.reason) + "\n" + message
-        post_or_say(message)
+        else:
+            shown = due_today if args.only_if_due_today else decisions
+            message = render_discord(week, their_name, mine, mine_m, theirs_m, odds, shown, gaps, roles, moves,
+                                     trades, swaps, lineup)
+            if args.reason:
+                message = rerun_banner(args.reason) + "\n" + message
+            post_or_say(message)
+        if feedback is not None and posted is not None:
+            status_by_date: dict[str, set[str]] = {}
+            for g in games:
+                status_by_date.setdefault(g.date, set()).add(g.status)
+            new = to_post(feedback_candidates(week, mine, slots, status_by_date, decisions,
+                                                 datetime.now(timezone.utc)), posted)
+            for candidate in new:
+                feedback.post(candidate)
+            print(f"\nlock feedback: posted {len(new)} to #daily-locks"
+                  + (f" ({', '.join(c.name for c in new)})" if new else ""))
+    if feedback is not None:
+        feedback.close()
     return 0
 
 
