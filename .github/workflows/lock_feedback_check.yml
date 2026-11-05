@@ -1,6 +1,6 @@
 # Setup check for lock feedback (engine/jobs/lock_feedback.py), run in the cloud because the
 # Discord secrets exist only here. Proves the bot token, the #daily-locks webhook, reading the
-# channel, the Message Content intent and Add Reactions, by posting a week-0 test message (never
+# channel and the Message Content intent, by posting a week-0 test message (never
 # counted as a lock). React to it with the lock emoji and re-run: the output lists who reacted.
 name: lock feedback check
 

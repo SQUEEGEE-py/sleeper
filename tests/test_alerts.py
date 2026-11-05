@@ -101,3 +101,44 @@ def test_phone_report_mentions_every_starter() -> None:
     assert "- Nikola Jokic: locked 53" in text and "- Bam Adebayo: done for the week, 41 counts" in text
     assert text.index("Kawhi Leonard is Out") < text.index("LOCK Kyrie")  # injuries first
     assert "start Saddiq Bey at F" in text
+
+
+def test_a_stand_in_is_one_instruction_not_a_lock_and_an_audition() -> None:
+    # User, 2026-11-05: the report said LOCK LeBron *and* start Jalen Green in his slot.
+    from engine.jobs.nightly import LineupReport, decision_line
+    from engine.model.lineup_moves import Audition, LineupOption, LineupPlan
+    lebron = Starter("1362", "LeBron James", "PHI", 40.0)
+    lebron.next_tip = datetime(2026, 11, 7, 0, 30, tzinfo=timezone.utc)   # Fri 7:30 PM ET
+    lebron.upcoming = []
+    green = LineupOption("2309", "Jalen Green", ("SG", "SF"), 40.0, next_game=date(2026, 11, 5),
+                         next_tip=datetime(2026, 11, 6, 2, 0, tzinfo=timezone.utc))  # Thu 9:00 PM ET
+    start = LineupOption("1362", "LeBron James", ("SF", "PF"), 40.9)
+    lebron.stand_in = Audition("SF#1", start, green, 45.0, 4.1, 40.9, keep_bench=False)
+    d = Decision("LeBron James", 40.0, 40.9, "stand_in", 0.95, 0.94, 0.0, "stand_in", 0.95, 45.0)
+    m = Matchup(roster_id=4, matchup_id=1, points=0.0, starters=[])
+    report = LineupReport(LineupPlan(0.0, 0.0), auditions=[])  # folded into the decision
+    text = render_discord(3, "ChickenJoe2107", [lebron], m, m, None, [(lebron, d)], [], lineup=report)
+    assert "**START Jalen Green at SF for his Thu 9:00 PM ET game instead of LeBron James" in text
+    assert "lock Jalen Green at 40.9+, otherwise put LeBron James back before Fri 7:30 PM ET" in text
+    assert "before Thu 9:00 PM ET" in text  # the deadline is Green's tip, not LeBron's
+    assert "95% starting Jalen Green Thu" in text
+    assert "LOCK LeBron" not in text and "Start for one game" not in text
+    assert "The rest of your lineup" not in text  # LeBron is covered by the decision
+    terminal = decision_line(lebron, d)
+    assert terminal.startswith("  Thu 9:00 PM ET") and "starting Jalen Green first 45.0" in terminal
+
+
+def test_auditions_on_a_starter_with_a_decision_are_folded_into_it() -> None:
+    from engine.jobs.nightly import attach_stand_ins
+    from engine.model.distributions import NormalScoreDistribution
+    from engine.model.lineup_moves import Audition, LineupOption
+    from engine.model.matchup import Slot
+    n45 = NormalScoreDistribution(45.0, 10.0)
+    open_ = Starter("1", "LeBron James", "PHI", 40.0, slot=Slot("LeBron", n45, (1.0, 1.0), pending=40.0))
+    fresh = Starter("2", "Kevin Durant", "HOU", 0.0, slot=Slot("Durant", n45, (1.0,)))  # nothing pending
+    def audition(pid: str) -> Audition:
+        return Audition("F#1", LineupOption(pid, "x", ("SF",), 40.0), LineupOption("9", "y", ("SF",), 40.0),
+                        45.0, 4.0, 41.0, keep_bench=False)
+    left = attach_stand_ins([open_, fresh], [audition("1"), audition("2")])
+    assert open_.stand_in is not None and fresh.stand_in is None
+    assert [a.starter.player_id for a in left] == ["2"]  # no decision to weigh it in: shown alone
