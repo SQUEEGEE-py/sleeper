@@ -1,0 +1,49 @@
+# Setup check for lock feedback (engine/jobs/lock_feedback.py), run in the cloud because the
+# Discord secrets exist only here. Proves the bot token, the #daily-locks webhook, reading the
+# channel, the Message Content intent and Add Reactions, by posting a week-0 test message (never
+# counted as a lock). React to it with the lock emoji and re-run: the output lists who reacted.
+name: lock feedback check
+
+on:
+  push:
+    branches: ["claude/**"]
+    paths:
+      - engine/jobs/lock_feedback.py
+      - .github/workflows/lock_feedback_check.yml
+  workflow_dispatch:
+    inputs:
+      post_test:
+        description: "Post a week-0 test message"
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+      - name: Install uv
+        run: python -m pip install uv
+      - name: Check the Discord setup
+        env:
+          DISCORD_LOCKS_WEBHOOK_URL: ${{ secrets.DISCORD_LOCKS_WEBHOOK_URL }}
+          DISCORD_BOT_TOKEN: ${{ secrets.DISCORD_BOT_TOKEN }}
+          DISCORD_LOCKS_USER_ID: ${{ secrets.DISCORD_LOCKS_USER_ID }}
+          POST_TEST: ${{ github.event_name == 'push' || inputs.post_test }}
+        run: |
+          flag=""
+          if [ "$POST_TEST" = "true" ]; then flag="--post-test"; fi
+          status=0
+          uv run --python 3.11 python -m engine.jobs.lock_feedback $flag > out.txt 2>&1 || status=$?
+          cat out.txt
+          # Step logs need a GitHub login; the summary and annotations show on the run page.
+          { echo '```'; cat out.txt; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+          while IFS= read -r line; do echo "::notice title=lock feedback::${line//%/%25}"; done < out.txt
+          exit $status

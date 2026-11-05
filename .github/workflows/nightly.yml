@@ -6,6 +6,8 @@
 #               report -- odds and every open LOCK/ROLL call;
 #   19:43 UTC = 3:43 pm ET (2:43 pm after DST ends): a reminder, posted only if a decision is
 #               due before tonight's games.
+# Every --post run also posts lock-feedback messages to #daily-locks for any day whose games are
+# all final, and reads the 🔒 reactions on earlier ones (idempotent; see lock_feedback.py).
 # And on every push that can change a recommendation -- the model, the league rules, the
 # snapshot it reads, or the advisor itself -- a full report headed with the commit's subject,
 # so a call that flips is explained by the change that flipped it.
@@ -55,6 +57,10 @@ jobs:
       - name: Run the advisor and post to Discord
         env:
           DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+          # Lock feedback (engine/jobs/lock_feedback.py): off unless both of the first two are set.
+          DISCORD_LOCKS_WEBHOOK_URL: ${{ secrets.DISCORD_LOCKS_WEBHOOK_URL }}
+          DISCORD_BOT_TOKEN: ${{ secrets.DISCORD_BOT_TOKEN }}
+          DISCORD_LOCKS_USER_ID: ${{ secrets.DISCORD_LOCKS_USER_ID }}
           SCHEDULE: ${{ github.event.schedule }}
           DUE_TODAY_INPUT: ${{ inputs.only_if_due_today }}
           EVENT: ${{ github.event_name }}

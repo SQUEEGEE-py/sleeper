@@ -58,7 +58,7 @@ pushed.
 Everything runnable today, in the order you would use it:
 
 ```
-uv run pytest                                             # 441 tests, none need the network
+uv run pytest                                             # 450 tests, none need the network
 uv run python -m engine.jobs.verify_league                # config vs live Sleeper; exits 1 on drift
 uv run python -m engine.jobs.ingest_history [--force]     # LOCAL ONLY: logs + schedule -> parquet
 uv run python -m engine.jobs.build_board [--top 150]      # -> data/board/{board.csv,board.html,pool.csv}
@@ -71,11 +71,12 @@ uv run python -m engine.jobs.nightly [--week N] [--post]                # win pr
 uv run python -m engine.jobs.publish_snapshot                           # data/ -> snapshot/ for Actions; commit it
 uv run python -m engine.jobs.probe_endpoints                            # stdlib only; also runs in Actions
 uv run python -m engine.jobs.resolve_scoring                            # flags vs Sleeper counted scores
+uv run python -m engine.jobs.lock_feedback                             # check the Discord lock-feedback setup
 ```
 
 Per-file test counts: scoring 89, distributions 39, lockin 37, nba_stats 26, lineup 25,
 player_ids 23, draft_sim 29, lock_sheet 17, rookies 15, valuation 11, draft_live 11,
-verify_league 8, runtime 4, matchup 14, locks 10, nightly 11, alerts 7, resolve_scoring 5, aging 7, roles 6, roster_moves 10, nightly_roster 6, trades 8, http_retry 5, lineup_moves 19.
+verify_league 8, runtime 4, matchup 14, locks 10, nightly 11, alerts 7, resolve_scoring 5, aging 7, roles 6, roster_moves 10, nightly_roster 6, trades 8, http_retry 5, lineup_moves 19, lock_feedback 9.
 
 `data/` is gitignored and regenerable. **On a fresh checkout run `ingest_history` then
 `build_board` before anything else** -- the 2026-10-16 session started with no `data/` at all.
@@ -895,6 +896,22 @@ LeBron Sat 38.7 -> 34.0, Kyrie Fri 34.8 -> 30.6); starting nine week value 482.9
    of the lock line the next report may say lock/roll instead. Scratch check pretending Wed
    11/4 was over: Green for Kyrie on Thu (lock at 39.6+, +4.6), Bey for Durant on Fri (+3.3).
    7 more mutations fail the suite.
+   **Lock feedback through Discord (user request, 2026-11-05)** -- `engine/jobs/lock_feedback.py`,
+   in `nightly --post`. Replaces hand-editing `state/locks.json` (which still works and wins a
+   disagreement). Once every game of a day is `complete`, the next run posts to `#daily-locks` one
+   message per starter whose latest game was that day, who played, still has games this week, is
+   not locked and whose next tip has not passed: name, slot, score, the advisor's call, and a
+   `-# lock w3 2026-11-02 1711 F#1 59.5` tag. The user reacts 🔒 on the ones he locked; every run
+   reads this week's messages back and a 🔒 from a non-bot (only `DISCORD_LOCKS_USER_ID` if set)
+   is a lock at that score, game and slot. The channel is the state; posting is idempotent by
+   (week, day, player). **Posting is a webhook (`DISCORD_LOCKS_WEBHOOK_URL`), reading is a bot
+   (`DISCORD_BOT_TOKEN`)**: a webhook cannot list a channel, and a bot cannot post over plain
+   HTTP until it has opened a gateway connection once. The bot needs View Channel, Read Message
+   History, Add Reactions (it pre-seeds 🔒; its own reaction never counts) and the Message
+   Content intent -- empty content is an error, never "no locks". An unreadable channel is a gap
+   and nothing is posted that run. A lock whose slot's position differs from Sleeper's lineup, or
+   who is no longer starting, is a gap. **Not yet probed against live Discord (rule 6)**: run
+   `python -m engine.jobs.lock_feedback` once the secrets exist. 9 tests; 5 mutations fail them.
    **Step 7 is done.** Open follow-ups from it: the late-season availability drop for weeks
    22-24 (above), and rebuilding current-season logs from Sleeper in the cloud so the
    snapshot refresh stops being a laptop chore.
