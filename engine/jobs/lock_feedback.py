@@ -290,18 +290,48 @@ def check(feedback: LockFeedback) -> int:
     return 0
 
 
+TEST_WEEK = 0  # no fantasy week is 0, so a test message can never count as a real lock
+
+
+def post_test(feedback: LockFeedback) -> int:
+    """Post a week-0 test message through the webhook, seed 🔒 with the bot, read it back."""
+    c = Candidate(TEST_WEEK, date.today(), "test", "Lock feedback test", "UTIL#1", 0.0,
+                  "this is a setup test -- react to it to check your reactions are read; it never counts")
+    message_id = feedback.post(c)
+    print(f"posted test message {message_id}")
+    back = feedback._get(f"{API}/channels/{feedback.channel_id}/messages/{message_id}")
+    if not back.get("content"):
+        print("FAIL: the bot reads the test message as empty -- switch on its Message Content intent")
+        return 1
+    if parse_tag(back["content"]) is None:
+        print("FAIL: the tag did not survive the round trip")
+        return 1
+    seeded = [r for r in back.get("reactions") or [] if (r.get("emoji") or {}).get("name") == LOCK_EMOJI]
+    if not seeded or not seeded[0].get("me"):
+        print(f"FAIL: the bot could not add {LOCK_EMOJI} -- give it Add Reactions in the channel")
+        return 1
+    print(f"OK: content readable, tag parsed, {LOCK_EMOJI} seeded by the bot")
+    return 0
+
+
 def main() -> int:
     from engine.jobs.runtime import utf8_output
 
     utf8_output()
     load_dotenv()
-    argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter).parse_args()
+    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument("--post-test", action="store_true",
+                        help="also post a week-0 test message, seed the lock emoji and read it back")
+    args = parser.parse_args()
     feedback = LockFeedback.from_env()
     if feedback is None:
         print(f"lock feedback is off: set {LOCKS_WEBHOOK_ENV} and {BOT_TOKEN_ENV}")
         return 1
     try:
-        return check(feedback)
+        result = check(feedback)
+        if result == 0 and args.post_test:
+            result = post_test(feedback)
+        return result
     finally:
         feedback.close()
 
