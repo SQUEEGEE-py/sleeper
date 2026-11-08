@@ -1,7 +1,7 @@
 """Copy what the player model reads into ``snapshot/``, which is committed, so the nightly job
 can run in GitHub Actions.
 
-    uv run python -m engine.jobs.ingest_history     # LOCAL: stats.nba.com blocks cloud IPs
+    uv run python -m engine.jobs.refresh_current_season   # this season from Sleeper; runs anywhere
     uv run python -m engine.jobs.build_board
     uv run python -m engine.jobs.publish_snapshot   # then commit and push snapshot/
 

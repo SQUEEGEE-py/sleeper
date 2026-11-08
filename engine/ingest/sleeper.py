@@ -104,6 +104,8 @@ class PlayerGame(BaseModel):
     week: int
     date: str  # "YYYY-MM-DD", US date of the game
     stats: dict[str, float | None]
+    team: str | None = None      # his team that night (NBA tricode)
+    game_id: str | None = None   # Sleeper's game id, shared by both teams' players
 
 
 class ScheduledGame(BaseModel):
@@ -295,7 +297,8 @@ class SleeperClient:
             f"player_games_{season}_{player_id}",
         )
         return [
-            PlayerGame(week=int(week), date=game["date"], stats=game.get("stats") or {})
+            PlayerGame(week=int(week), date=game["date"], stats=game.get("stats") or {},
+                       team=game.get("team"), game_id=game.get("game_id"))
             for week, games in (data or {}).items()
             for game in (games or [])
             if game and game.get("date")
