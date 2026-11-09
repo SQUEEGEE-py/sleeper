@@ -58,7 +58,7 @@ pushed.
 Everything runnable today, in the order you would use it:
 
 ```
-uv run pytest                                             # 458 tests, none need the network
+uv run pytest                                             # 463 tests, none need the network
 uv run python -m engine.jobs.verify_league                # config vs live Sleeper; exits 1 on drift
 uv run python -m engine.jobs.ingest_history [--force]     # LOCAL ONLY: logs + schedule -> parquet
 uv run python -m engine.jobs.build_board [--top 150]      # -> data/board/{board.csv,board.html,pool.csv}
@@ -68,6 +68,7 @@ uv run python -m engine.jobs.draft_rehearsal --calibrate                # 2025 r
 uv run python -m engine.jobs.draft_live [--draft-id <mock id>] [--slot N] # -> data/draft/live.html
 uv run python -m engine.jobs.lock_sheet [--week N]                      # -> data/lock/lock_sheet.html
 uv run python -m engine.jobs.nightly [--week N] [--post]                # win prob + LOCK/ROLL; --post -> Discord
+uv run python -m engine.jobs.refresh_current_season                    # this season's logs + week grid from Sleeper; cloud-safe
 uv run python -m engine.jobs.publish_snapshot                           # data/ -> snapshot/ for Actions; commit it
 uv run python -m engine.jobs.probe_endpoints                            # stdlib only; also runs in Actions
 uv run python -m engine.jobs.resolve_scoring                            # flags vs Sleeper counted scores
@@ -76,7 +77,7 @@ uv run python -m engine.jobs.lock_feedback                             # check t
 
 Per-file test counts: scoring 89, distributions 39, lockin 37, nba_stats 26, lineup 25,
 player_ids 23, draft_sim 29, lock_sheet 17, rookies 15, valuation 11, draft_live 11,
-verify_league 8, runtime 4, matchup 17, locks 10, nightly 11, alerts 12, resolve_scoring 5, aging 7, roles 6, roster_moves 10, nightly_roster 6, trades 8, http_retry 5, lineup_moves 19, lock_feedback 9.
+verify_league 8, runtime 4, matchup 17, locks 10, nightly 11, alerts 12, resolve_scoring 5, aging 7, roles 6, roster_moves 10, nightly_roster 6, trades 8, http_retry 5, lineup_moves 19, lock_feedback 9, sleeper_logs 5.
 
 `data/` is gitignored and regenerable. **On a fresh checkout run `ingest_history` then
 `build_board` before anything else** -- the 2026-10-16 session started with no `data/` at all.
@@ -943,9 +944,21 @@ LeBron Sat 38.7 -> 34.0, Kyrie Fri 34.8 -> 30.6); starting nine week value 482.9
    Sleeper's per-game projections are at
    `api.sleeper.com/projections/nba/player/{id}?season_type=regular&season=2026&grouping=week`
    (probed 2026-11-05; conditional on playing, `gp` 1.0). Not used by the model.
-   **Step 7 is done.** Open follow-ups from it: the late-season availability drop for weeks
-   22-24 (above), and rebuilding current-season logs from Sleeper in the cloud so the
-   snapshot refresh stops being a laptop chore.
+   **Snapshot refresh without the laptop (2026-11-08).** This cloud session cannot reach
+   stats.nba.com at all (proxy 403), so `engine/ingest/sleeper_logs.py` +
+   `engine/jobs/refresh_current_season.py` rebuild **the current season only** from Sleeper's
+   per-game stats (every Sleeper player on a team, ~555 requests, 6 at a time, ~13 s) and the
+   week grid from Sleeper's schedule. Completed seasons stay as ingested (copy `snapshot/*.parquet`
+   to `data/nba/` on a fresh machine). `game_id` is Sleeper's, so a season is never mixed across
+   sources (`team_games_played` counts distinct ids); tf/ff are real. NBA ids come from the name
+   join against every log we hold; a player never seen before is a gap (Tacko Fall, 1 game).
+   The job compares itself with the file it replaces and refuses to write past 3% missing or
+   0.5 fp/game: first run, through 10/25, 859/859 present, 817 identical, 40 differ by tf/ff and 2
+   by a turnover; the 110 extra were 10/25 games the old file pulled mid-day. 3132 player-games
+   to 11/7. Board rebuilt (511 players); snapshot published 2026-11-08. 5 tests; 4 mutations
+   fail them. Next step if wanted: run it weekly from Actions.
+   **Step 7 is done.** Open follow-up from it: the late-season availability drop for weeks
+   22-24 (above).
 
    Original plan: free-agent ranker (this-week and rest-of-season
    value vs the user's lowest-value player, through `player_model`); with reverse-standings
