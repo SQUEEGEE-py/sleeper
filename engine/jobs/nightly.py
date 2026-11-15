@@ -74,13 +74,17 @@ from engine.model.trades import Deadline, Trade, TradePlayer, find_trades, post_
 from engine.model.trades import deadline as trade_deadline
 from engine.model.roster_moves import (
     Candidate,
+    CoverAlert,
+    DepthPlayer,
     IRAlert,
     Pickup,
     RosterPlayer,
+    cover_alerts,
     ir_alerts,
     rank_pickups,
     unavailable,
     waiver_reason,
+    week_out_probability,
 )
 from engine.model.scoring import box_from_sleeper_stats, load_rules, score_box
 
@@ -405,10 +409,11 @@ def render_discord(week: int, their_name: str, mine: list[Starter], my_matchup: 
     others = [s for s in mine if s.player_id not in decided and s.player_id != EMPTY_SLOT]
     if others:
         lines += ["", "**The rest of your lineup**"] + [f"- {starter_line(s)}" for s in others]
-    if moves is not None and (moves.ir or moves.pickups):
+    if moves is not None and (moves.ir or moves.pickups or moves.cover):
         priority = f" (waiver priority #{moves.waiver_position})" if moves.waiver_position else ""
         lines += ["", f"**Roster moves**{priority}"]
-        lines += [f"- {a.text}" for a in moves.ir] + [f"- Pick up {pk.describe()}" for pk in moves.pickups]
+        lines += [f"- {a.text}" for a in moves.ir] + [f"- {a.describe()}" for a in moves.cover]
+        lines += [f"- Pick up {pk.describe()}" for pk in moves.pickups[:3]]
     flagged = [r for r in roles or [] if r.flagged]
     if flagged:
         lines += ["", "Role change:"] + [f"- {r.describe()}" for r in flagged]
@@ -534,8 +539,12 @@ def render(week: int, my_name: str, their_name: str, mine: list[Starter], theirs
         priority = f" (you are #{moves.waiver_position} in waiver priority)" if moves.waiver_position else ""
         lines.append(f"\nROSTER MOVES{priority}")
         lines += [f"  IR: {a.text}" for a in moves.ir] or ["  IR: nothing to do"]
+        lines += [f"  !! COVER: {a.describe()}" for a in moves.cover] or ["  COVER: every starting position has a backup"]
+        spots = (f"{moves.open_spots} open roster spot(s), so an add needs no drop" if moves.open_spots
+                 else "roster full, so an add means a drop")
+        lines.append(f"  PICKUPS ({spots}; expected lineup points per week, a week out counted for everyone):")
         lines += ([f"  PICKUP: {pk.describe()}" for pk in moves.pickups]
-                  or ["  PICKUP: no free agent beats your bench by the margin"])
+                  or ["  PICKUP: no free agent improves your expected lineup by the margin"])
     if trades is not None:
         lines.append(f"\nTRADES ({trades.deadline.describe()}; both lineups must improve, our model;"
                      " Slpr = Sleeper's rank, the market view)")
@@ -777,14 +786,21 @@ class RosterMoves:
     pickups: list[Pickup]
     waiver_position: int | None
     gaps: list[str]
+    cover: list[CoverAlert] = field(default_factory=list)
+    open_spots: int = 0
+
+
+PICKUPS_SHOWN = 5
 
 
 def roster_moves(config: dict, roster, rosters: list, players: dict, pool: pd.DataFrame,
                  status: dict[tuple[str, str], str], today: date, transactions: list,
-                 now: datetime) -> RosterMoves:
-    """IR alerts and free-agent pickups for the user's roster (``roster_moves.py`` has the
-    rules). Values are the board's VOR from ``pool.csv``; a bench player missing from it is a
-    gap, not a zero."""
+                 now: datetime, season_logs: pd.DataFrame | None = None) -> RosterMoves:
+    """IR alerts, position cover and free-agent pickups for the user's roster
+    (``roster_moves.py`` has the rules). Values are the board's weekly ``season_value`` and
+    ``p_play`` from ``pool.csv``; an active player missing from it is a gap, not a zero.
+    ``season_logs``: this season's game logs (``nba_player_id``, ``minutes``, ``fp``), for the
+    "this season" line beside each free agent."""
     extra = roster.model_extra or {}
     reserve_ids = list(extra.get("reserve") or [])
     roster_ids = list(roster.players or [])
@@ -798,9 +814,27 @@ def roster_moves(config: dict, roster, rosters: list, players: dict, pool: pd.Da
         player = players.get(pid)
         return player.injury_status if player else None
 
+    def positions_of(pid: str) -> tuple[str, ...]:
+        return tuple(ast.literal_eval(pool.loc[pid, "positions"]))
+
     active = [RosterPlayer(pid, name_of(pid), status_of(pid)) for pid in roster_ids if pid not in reserve_ids]
     reserve = [RosterPlayer(pid, name_of(pid), status_of(pid)) for pid in reserve_ids]
     ir = ir_alerts(active, reserve, config["ir"]["slots"], config["ir"]["eligible_statuses"])
+
+    # Roster size = every roster position, bench included; IR players take none of it.
+    open_spots = max(len(config["roster_positions"]) - len(active), 0)
+    slots = starting_slots(config["roster_positions"])
+    depth = []
+    for rp in active:
+        if rp.player_id not in pool.index:
+            gaps.append(f"{rp.name}: not in pool.csv, so left out of the pickup and cover comparison")
+            continue
+        row = pool.loc[rp.player_id]
+        # An active player listed OUT is no cover this week: he counts as absent.
+        week_out = 1.0 if unavailable(rp.injury_status) else week_out_probability(float(row["p_play"]))
+        depth.append(DepthPlayer(rp.player_id, rp.name, positions_of(rp.player_id),
+                                 float(row["season_value"]), week_out))
+    droppable = {pid for pid in roster_ids if pid not in (roster.starters or []) and pid not in reserve_ids}
 
     dropped_at: dict[str, datetime] = {}
     for t in transactions:
@@ -811,6 +845,8 @@ def roster_moves(config: dict, roster, rosters: list, players: dict, pool: pd.Da
     started = {team for (team, day), state in status.items() if day == today.isoformat() and state != "pre_game"}
     rostered = {pid for r in rosters for pid in (r.players or [])}
     waivers = config["waivers"]
+    now_by_id = (season_logs.groupby("nba_player_id").agg(g=("fp", "size"), m=("minutes", "mean"), f=("fp", "mean"))
+                 if season_logs is not None and len(season_logs) else None)
     candidates = []
     for sid, row in pool.iterrows():
         player = players.get(sid)
@@ -818,19 +854,19 @@ def roster_moves(config: dict, roster, rosters: list, players: dict, pool: pd.Da
             continue
         reason = waiver_reason(sid, player.team, dropped_at, now, waivers["clear_days"], started,
                                waivers["after_game_start"])
-        candidates.append(Candidate(sid, str(row["name"]), player.team, tuple(ast.literal_eval(row["positions"])),
-                                    float(row["vor"]), player.injury_status, reason is not None, reason or ""))
+        line = {}
+        nba_id = row.get("nba_player_id")
+        if now_by_id is not None and pd.notna(nba_id) and int(nba_id) in now_by_id.index:
+            r = now_by_id.loc[int(nba_id)]
+            line = dict(games_now=int(r["g"]), minutes_now=float(r["m"]), fp_now=float(r["f"]))
+        candidates.append(Candidate(sid, str(row["name"]), player.team, positions_of(sid),
+                                    float(row["season_value"]), float(row["p_play"]), player.injury_status,
+                                    reason is not None, reason or "", **line))
 
-    droppable = []
-    for pid in roster_ids:
-        if pid in (roster.starters or []) or pid in reserve_ids:
-            continue
-        if pid in pool.index:
-            droppable.append((name_of(pid), float(pool.loc[pid, "vor"])))
-        else:
-            gaps.append(f"{name_of(pid)}: not in pool.csv, so not compared against free agents")
+    every = rank_pickups(candidates, depth, droppable, slots, open_spots, limit=None)
+    cover = cover_alerts(depth, slots, every)
     position = (extra.get("settings") or {}).get("waiver_position")
-    return RosterMoves(ir, rank_pickups(candidates, droppable), position, gaps)
+    return RosterMoves(ir, every[:PICKUPS_SHOWN], position, gaps, cover, open_spots)
 
 
 @dataclass
@@ -914,14 +950,14 @@ def run(args: argparse.Namespace) -> int:
                         season=season)
     rules = load_rules()
     today = today_eastern()
-    gaps: list[str] = []
+    gaps: list[str] = list(args.note)
     manifest = args.data_dir / "manifest.json"
-    if manifest.exists():  # running from snapshot/ (Actions): say if the model is going stale
+    if manifest.exists():  # running from snapshot/: say if the model is going stale
         published = datetime.fromisoformat(json.loads(manifest.read_text(encoding="utf-8"))["published"])
         age = (datetime.now(timezone.utc) - published).days
         if age > SNAPSHOT_STALE_DAYS:
-            gaps.append(f"model snapshot is {age} days old -- refresh it on the laptop "
-                        "(ingest_history, build_board, publish_snapshot, push)")
+            gaps.append(f"model snapshot is {age} days old -- run refresh_current_season, build_board, "
+                        "publish_snapshot and push")
 
     with SleeperClient() as client:
         games = client.get_nba_schedule(season_year)
@@ -1022,7 +1058,8 @@ def run(args: argparse.Namespace) -> int:
             bench.append((built, tuple((player.fantasy_positions or []) if player else [])))
         swaps = injury_swaps(mine, starting_slots(config["roster_positions"]), bench, players)
         moves = roster_moves(config, roster, rosters, players, pool, status, today, transactions,
-                             datetime.now(timezone.utc))
+                             datetime.now(timezone.utc),
+                             model.logs[model.logs["season"] == model.season])
         gaps += moves.gaps
         trades = trade_report(config, roster.roster_id, rosters, owners, pool,
                               starting_slots(config["roster_positions"]), games, week, today)
@@ -1140,6 +1177,8 @@ def main() -> int:
                         help="with --post: post only decisions whose next game is today (the afternoon reminder)")
     parser.add_argument("--locks", type=Path, default=LOCKS_PATH,
                         help="locks the user reported (Sleeper does not expose them)")
+    parser.add_argument("--note", action="append", default=[],
+                        help="a gap to list in the report (Actions: the data refresh failed)")
     parser.add_argument("--reason", default="",
                         help="with --post: why this run happened off-schedule (the commit that changed the model)")
     args = parser.parse_args()

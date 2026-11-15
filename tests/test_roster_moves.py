@@ -5,13 +5,25 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+from itertools import product
+
+import pytest
+
+from engine.model.lineup import is_eligible
 from engine.model.roster_moves import (
+    OPEN_SPOT_MIN_GAIN,
+    PICKUP_MIN_GAIN,
+    WEEK_OUT_BY_P_PLAY,
     Candidate,
+    DepthPlayer,
     RosterPlayer,
+    cover_alerts,
     ir_alerts,
     ir_eligibility,
+    lineup_outlook,
     rank_pickups,
     unavailable,
+    week_out_probability,
 )
 
 CONFIG = json.loads(Path("config/league.json").read_text(encoding="utf-8"))
@@ -61,25 +73,93 @@ def test_sleeper_ir_designation_is_flagged_as_assumed() -> None:
     assert alert.kind == "stash" and "assumed eligible" in alert.text
 
 
-def c(name: str, vor: float, status: str | None = None, waivers: bool = False) -> Candidate:
-    return Candidate(name.lower(), name, "UTA", ("SF",), vor, status, waivers)
+SLOTS_SMALL = ["G#1", "F#1", "C#1", "C#2"]
 
 
-def test_pickups_beat_the_weakest_droppable_player_by_the_margin() -> None:
-    bench = [("DeRozan", -1.9), ("Vucevic", -3.6), ("Bey", 2.1)]
-    picks = rank_pickups([c("Small", -2.0), c("Big", 1.5), c("Huge", 4.0, waivers=True)], bench)
-    assert [(x.candidate.name, x.drop, round(x.gain, 1)) for x in picks] == [("Huge", "Vucevic", 7.6), ("Big", "Vucevic", 5.1)]
-    assert "claim on waivers" in picks[0].describe() and "add now" in picks[1].describe()
+def d(name: str, pos: str, value: float, out: float = 0.05) -> DepthPlayer:
+    return DepthPlayer(name.lower(), name, (pos,), value, out)
+
+
+def c(name: str, pos: str, value: float, status: str | None = None, waivers: bool = False,
+      p_play: float = 0.95) -> Candidate:
+    return Candidate(name.lower(), name, "UTA", (pos,), value, p_play, status, waivers)
+
+
+# Two C slots, exactly two centres -- the user's roster on 2026-11-15.
+ROSTER = [d("Guard", "PG", 45), d("Guard2", "SG", 41), d("Wing", "SF", 44), d("Jokic", "C", 65), d("Bam", "C", 52), d("Bench", "SF", 39)]
+
+
+def test_week_out_follows_the_measured_table() -> None:
+    for p_play, rate in WEEK_OUT_BY_P_PLAY:
+        assert week_out_probability(p_play) == pytest.approx(rate)
+    assert week_out_probability(0.80) == pytest.approx(0.099 + (0.80 - 0.758) / (0.851 - 0.758) * (0.051 - 0.099))
+    assert week_out_probability(0.30) == 0.204 and week_out_probability(1.0) == 0.010
+
+
+def test_outlook_equals_brute_force_over_every_absence() -> None:
+    from engine.model.lineup import lineup_value
+    players = [d("A", "PG", 40, 0.2), d("B", "C", 50, 0.1), d("C2", "C", 30, 0.3), d("F", "SF", 35, 0.05)]
+    slots = ["G#1", "C#1", "UTIL#1"]
+    expected = p_c_empty = 0.0
+    for outs in product([False, True], repeat=len(players)):
+        w = 1.0
+        for player, out in zip(players, outs):
+            w *= player.week_out if out else 1 - player.week_out
+        here = [p for p, out in zip(players, outs) if not out]
+        expected += w * lineup_value([p.value for p in here], [p.positions for p in here], slots)
+        p_c_empty += w * (not any(is_eligible(p.positions, "C#1") for p in here))
+    outlook = lineup_outlook(players, slots, max_absent=len(players))
+    assert outlook.expected == pytest.approx(expected) and outlook.p_unfilled["C"] == pytest.approx(p_c_empty)
+    assert outlook.healthy == pytest.approx(50 + 40 + 35)
+    # Truncated at two absent (the default) and renormalised: under 0.1% of the lineup at
+    # realistic week-out rates, and nearly the same for every candidate compared.
+    real = [DepthPlayer(p.player_id, p.name, p.positions, p.value, 0.05) for p in players] * 2
+    assert lineup_outlook(real, slots).expected == pytest.approx(
+        lineup_outlook(real, slots, max_absent=len(real)).expected, rel=0.001)
+
+
+def test_a_backup_at_the_uncovered_position_beats_a_better_player_elsewhere() -> None:
+    # Neither improves the healthy lineup; the centre covers a slot that would otherwise sit
+    # empty, the wing only improves on a 39 backup.
+    picks = rank_pickups([c("Wing2", "SF", 43), c("Gobert", "C", 34)], ROSTER, {"bench"}, SLOTS_SMALL, open_spots=1,
+                         open_min_gain=0.0)
+    assert [p.candidate.name for p in picks] == ["Gobert", "Wing2"] and picks[0].gain > 5 * picks[1].gain
+    pick = picks[0]
+    assert pick.drop is None and pick.healthy_gain == pytest.approx(0.0)
+    assert pick.gain == pytest.approx(34 * 0.05 * 0.95 * 2, rel=0.05)  # either centre out, the other in
+    assert "into your open roster spot" in pick.describe() and "as cover" in pick.describe()
+
+
+def test_with_no_open_spot_the_best_bench_drop_is_named_and_starters_are_never_dropped() -> None:
+    star = c("Star", "PG", 60)
+    (pick,) = rank_pickups([star], ROSTER, {"bench"}, SLOTS_SMALL, open_spots=0)
+    assert pick.drop == "Bench" and pick.gain > PICKUP_MIN_GAIN
+    assert "dropping Bench" in pick.describe()
+    assert rank_pickups([star], ROSTER, set(), SLOTS_SMALL, open_spots=0) == []  # no bench: nothing to drop
+
+
+def test_a_swap_has_a_higher_bar_than_an_add_into_an_open_spot() -> None:
+    # A shade above the open-spot bar: listed with a spot free, not as a swap.
+    small = [c("Backup", "C", 4.0)]
+    open_gain = rank_pickups(small, ROSTER, {"bench"}, SLOTS_SMALL, open_spots=1)[0].gain
+    assert OPEN_SPOT_MIN_GAIN <= open_gain < PICKUP_MIN_GAIN
+    assert rank_pickups(small, ROSTER, {"bench"}, SLOTS_SMALL, open_spots=0) == []
 
 
 def test_unavailable_free_agents_are_not_pickups() -> None:
     assert unavailable("Out") and unavailable("IR") and not unavailable("GTD") and not unavailable(None)
-    assert rank_pickups([c("Hurt", 9.0, "Out")], [("Bey", 0.0)]) == []
-    assert rank_pickups([c("Q", 9.0, "GTD")], [("Bey", 0.0)])[0].candidate.name == "Q"
+    assert rank_pickups([c("Hurt", "PG", 90, "Out")], ROSTER, {"bench"}, SLOTS_SMALL, 1) == []
+    assert rank_pickups([c("Q", "PG", 90, "GTD")], ROSTER, {"bench"}, SLOTS_SMALL, 1)[0].candidate.name == "Q"
 
 
-def test_no_bench_no_pickups() -> None:
-    assert rank_pickups([c("Huge", 9.0)], []) == []
+def test_cover_alert_for_a_position_with_no_backup() -> None:
+    picks = rank_pickups([c("Gobert", "C", 34)], ROSTER, {"bench"}, SLOTS_SMALL, 1)
+    (alert,) = cover_alerts(ROSTER, SLOTS_SMALL, picks)
+    assert alert.position == "C" and alert.eligible == ("Jokic", "Bam")
+    assert alert.p_empty == pytest.approx(1 - 0.95 ** 2, rel=0.03)  # truncated at two absent
+    assert "No backup at C" in alert.describe() and "Best cover: Gobert" in alert.describe()
+    covered = [*ROSTER, d("Gobert", "C", 34)]
+    assert cover_alerts(covered, SLOTS_SMALL) == []  # empty only when two of three centres are out
 
 
 def test_waiver_reason() -> None:

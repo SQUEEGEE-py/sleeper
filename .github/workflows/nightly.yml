@@ -1,5 +1,8 @@
-# The nightly lock advisor, posted to Discord. Reads Sleeper and ESPN live and the player
-# model from snapshot/ (stats.nba.com blocks GitHub's IPs; refresh snapshot/ from the laptop).
+# The nightly lock advisor, posted to Discord. Reads Sleeper and ESPN live. Before each run the
+# season being played is rebuilt from Sleeper's per-game stats and the board rebuilt on it
+# (refresh_current_season + build_board, ~35 s); completed seasons come from snapshot/
+# (stats.nba.com blocks GitHub's IPs, and they never change). If the refresh fails, the run
+# falls back to snapshot/ as committed and the report says so.
 #
 # GitHub starts scheduled runs late, sometimes by 30+ minutes, and in UTC. So:
 #   07:43 UTC = 3:43 am ET (2:43 am after DST ends): after the last West Coast game, the full
@@ -54,8 +57,17 @@ jobs:
           python-version: "3.11"
       - name: Install uv
         run: python -m pip install uv
+      - name: Refresh this season's logs and the board from Sleeper
+        id: refresh
+        continue-on-error: true
+        run: |
+          mkdir -p data/nba
+          cp snapshot/*.parquet data/nba/
+          uv run --python 3.11 python -m engine.jobs.refresh_current_season
+          uv run --python 3.11 python -m engine.jobs.build_board
       - name: Run the advisor and post to Discord
         env:
+          REFRESH: ${{ steps.refresh.outcome }}
           DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
           # Lock feedback (engine/jobs/lock_feedback.py): off unless both of the first two are set.
           DISCORD_LOCKS_WEBHOOK_URL: ${{ secrets.DISCORD_LOCKS_WEBHOOK_URL }}
@@ -75,5 +87,11 @@ jobs:
           if [ "$EVENT" = "push" ]; then
             reason="$COMMIT_MESSAGE"
           fi
-          uv run --python 3.11 python -m engine.jobs.nightly --post \
-            --data-dir snapshot --pool snapshot/pool.csv $flag --reason "$reason"
+          if [ "$REFRESH" = "success" ]; then
+            uv run --python 3.11 python -m engine.jobs.nightly --post \
+              --data-dir data/nba --pool data/board/pool.csv $flag --reason "$reason"
+          else
+            uv run --python 3.11 python -m engine.jobs.nightly --post \
+              --data-dir snapshot --pool snapshot/pool.csv $flag --reason "$reason" \
+              --note "data refresh from Sleeper failed this run (see the Actions log); using the committed snapshot"
+          fi

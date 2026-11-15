@@ -12,6 +12,8 @@ The recipe (each step's reasoning lives with the function it calls):
   games) the band comes from his preseason-projected minutes when he has any.
 * **A rookie** -- past player-seasons at his projected minutes, scaled by the measured rookie
   discount (``rookies.rookie_cohort_distribution``).
+* A veteran is then age-adjusted (``aging.py``) and role-adjusted for this season's minutes
+  (``roles.role_factor``), both faded as this season's games take over his sample.
 * Either way, a row in ``config/player_overrides.csv`` is applied last.
 """
 
@@ -25,6 +27,7 @@ import pandas as pd
 
 from engine.ingest.player_ids import PlayerOverride
 from engine.model.aging import age_adjusted, effective_factor, previous_season_share
+from engine.model.roles import ROLE_MIN_LAST_GAMES, role_factor
 from engine.model.distributions import (
     MIN_GAMES_FOR_RELIABLE_HISTORY,
     EmpiricalScoreDistribution,
@@ -135,6 +138,12 @@ class PlayerModel:
         self._discount: float | None = None
         self.age_factors: dict[int, float] = {}  # effective factor applied, for reports
         self.unaged: set[int] = set()
+        self.role_factors: dict[int, float] = {}  # role factor applied, for reports
+        by_season = self.logs.groupby(["nba_player_id", "season"])["minutes"].agg(["mean", "size"])
+        self._season_minutes: dict[int, list[tuple[str, float, int]]] = {}
+        for (nba_id, season_name), row in by_season.iterrows():
+            self._season_minutes.setdefault(int(nba_id), []).append(
+                (str(season_name), float(row["mean"]), int(row["size"])))
 
     # --- who is who ---------------------------------------------------------------------------
 
@@ -179,7 +188,7 @@ class PlayerModel:
             minutes = self.projection.project(self.preseason_minutes_by_id[nba_id])
         prior = self.priors.get(band_for(minutes))
         distribution = build_distribution(self.logs, nba_id, prior=prior)
-        return self._override(nba_id, self._aged(nba_id, distribution))
+        return self._override(nba_id, self._role(nba_id, self._aged(nba_id, distribution)))
 
     def _aged(self, nba_id: int, distribution: EmpiricalScoreDistribution) -> EmpiricalScoreDistribution:
         """The age adjustment, for veterans only: the rookie cohort is calibrated on its own.
@@ -194,6 +203,22 @@ class PlayerModel:
         share = previous_season_share(self.logs[self.logs["nba_player_id"] == nba_id], self.season)
         factor = effective_factor(birth, self.season, share)
         self.age_factors[nba_id] = factor
+        return age_adjusted(distribution, factor)
+
+    def _role(self, nba_id: int, distribution: EmpiricalScoreDistribution) -> EmpiricalScoreDistribution:
+        """This season's minutes against his most recent earlier season's (``roles.py`` has the
+        backtest). Only with ``season`` set, like the age adjustment."""
+        if self.season is None:
+            return distribution
+        seasons = sorted(self._season_minutes.get(nba_id, []))  # "2024-25" sorts chronologically
+        now = next(((m, n) for s, m, n in seasons if s == self.season), None)
+        earlier = [(m, n) for s, m, n in seasons if s < self.season and n >= ROLE_MIN_LAST_GAMES]
+        if now is None or not earlier:
+            return distribution
+        share = previous_season_share(self.logs[self.logs["nba_player_id"] == nba_id], self.season)
+        factor = role_factor(now[0], now[1], earlier[-1][0], share)
+        if factor != 1.0:
+            self.role_factors[nba_id] = factor
         return age_adjusted(distribution, factor)
 
     @property
