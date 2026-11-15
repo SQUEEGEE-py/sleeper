@@ -734,8 +734,10 @@ LeBron Sat 38.7 -> 34.0, Kyrie Fri 34.8 -> 30.6); starting nine week value 482.9
      logs there for Actions. It is a copy, so the cloud model learns this season only when
      refreshed from the laptop; the report flags it once it is over 8 days old. Rebuilding
      current-season logs from Sleeper's per-game stats in the cloud would remove that chore.
-   - **`.github/workflows/nightly.yml`**: 07:43 UTC full report, 19:43 UTC reminder only if a
-     decision is due that day, plus manual runs. Both workflows on checkout v5 / setup-python v6.
+   - **`.github/workflows/nightly.yml`**: full report at **6:47 am Mountain** (moved from 07:43
+     UTC on 2026-11-15, user's choice of "7 AM MT"; cron is UTC-only, so `47 12` serves MDT and
+     `47 13` MST and a "morning gate" step skips the one that does not match Denver's clock),
+     19:43 UTC reminder only if a decision is due that day, plus manual runs. Both workflows on checkout v5 / setup-python v6.
    - **Re-run on model change** (user request, 2026-10-22, after the age adjustment flipped
      Kawhi from ROLL to LOCK with no explanation in Discord): any push touching
      `engine/model/**`, `engine/ingest/**`, `nightly.py`, `lock_sheet.py`, `build_board.py`,
@@ -836,7 +838,7 @@ LeBron Sat 38.7 -> 34.0, Kyrie Fri 34.8 -> 30.6); starting nine week value 482.9
      weakest **bench** player by `PICKUP_MIN_GAIN` = 2.0 per week; OUT/IR free agents skipped.
      **Waivers inferred, not read**: dropped within `clear_days` (from transactions), or his
      game today has tipped (`after_game_start`). The one processed claim so far ran Wed
-     03:08 ET (just after midnight PT), so the 07:43 UTC report lands after waivers clear.
+     03:08 ET (just after midnight PT), so the morning report lands after waivers clear.
      Shows the user's `waiver_position`.
    - First live run (Thu 10/22): IR nothing to do; you are #7 in priority; five free agents
      beat Vucevic (-3.6 VOR after aging) by 3-5/week: Jeremiah Fears, Jabari Smith Jr. (one
