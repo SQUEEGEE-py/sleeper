@@ -956,7 +956,13 @@ LeBron Sat 38.7 -> 34.0, Kyrie Fri 34.8 -> 30.6); starting nine week value 482.9
    0.5 fp/game: first run, through 10/25, 859/859 present, 817 identical, 40 differ by tf/ff and 2
    by a turnover; the 110 extra were 10/25 games the old file pulled mid-day. 3132 player-games
    to 11/7. Board rebuilt (511 players); snapshot published 2026-11-08. 5 tests; 4 mutations
-   fail them. Next step if wanted: run it weekly from Actions.
+   fail them. **Automated 2026-11-15** (user request): `nightly.yml` now runs
+   `refresh_current_season` + `build_board` before every advisor run (~35 s; `snapshot/*.parquet`
+   copied to `data/nba/` first, so completed seasons and the comparison base come from the
+   snapshot). The advisor reads `data/nba` + `data/board/pool.csv`. If either step fails
+   (Sleeper down, or the refresh's own 3% / 0.5 fp check refuses), it falls back to `snapshot/`
+   and the report lists the failure as a gap (`nightly --note`). The snapshot is no longer a
+   weekly chore; republish it now and then so the fallback and comparison base stay recent.
    **Pickups, position cover and the role factor (user request, 2026-11-15).** The user had
    12 active players plus Kawhi and Caleb Wilson in IR (one open spot), and the report said "no
    free agent beats your bench": pickups always assumed a drop, and valued a bench player only

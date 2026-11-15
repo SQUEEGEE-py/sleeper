@@ -950,14 +950,14 @@ def run(args: argparse.Namespace) -> int:
                         season=season)
     rules = load_rules()
     today = today_eastern()
-    gaps: list[str] = []
+    gaps: list[str] = list(args.note)
     manifest = args.data_dir / "manifest.json"
-    if manifest.exists():  # running from snapshot/ (Actions): say if the model is going stale
+    if manifest.exists():  # running from snapshot/: say if the model is going stale
         published = datetime.fromisoformat(json.loads(manifest.read_text(encoding="utf-8"))["published"])
         age = (datetime.now(timezone.utc) - published).days
         if age > SNAPSHOT_STALE_DAYS:
-            gaps.append(f"model snapshot is {age} days old -- refresh it on the laptop "
-                        "(ingest_history, build_board, publish_snapshot, push)")
+            gaps.append(f"model snapshot is {age} days old -- run refresh_current_season, build_board, "
+                        "publish_snapshot and push")
 
     with SleeperClient() as client:
         games = client.get_nba_schedule(season_year)
@@ -1177,6 +1177,8 @@ def main() -> int:
                         help="with --post: post only decisions whose next game is today (the afternoon reminder)")
     parser.add_argument("--locks", type=Path, default=LOCKS_PATH,
                         help="locks the user reported (Sleeper does not expose them)")
+    parser.add_argument("--note", action="append", default=[],
+                        help="a gap to list in the report (Actions: the data refresh failed)")
     parser.add_argument("--reason", default="",
                         help="with --post: why this run happened off-schedule (the commit that changed the model)")
     args = parser.parse_args()
