@@ -4,11 +4,15 @@
 # (stats.nba.com blocks GitHub's IPs, and they never change). If the refresh fails, the run
 # falls back to snapshot/ as committed and the report says so.
 #
-# GitHub starts scheduled runs late, sometimes by 30+ minutes, and in UTC. So:
-#   07:43 UTC = 3:43 am ET (2:43 am after DST ends): after the last West Coast game, the full
-#               report -- odds and every open LOCK/ROLL call;
-#   19:43 UTC = 3:43 pm ET (2:43 pm after DST ends): a reminder, posted only if a decision is
-#               due before tonight's games.
+# GitHub starts scheduled runs late (usually 5-20 minutes, once 7 hours), and only in UTC. So:
+#   morning, 6:47 am Mountain (user's choice 2026-11-15: "7 AM MT", scheduled a little early so
+#               it lands near 7): the full report -- odds and every open LOCK/ROLL call. Last
+#               night's games are final and waivers (about 3 am ET) have run. Mountain time is
+#               UTC-6 in summer time (MDT: the season to Oct 31, and from Mar 14) and UTC-7 in
+#               winter (MST), and cron cannot follow that, so there are two schedules and the
+#               "morning gate" step skips whichever does not match Denver's clock today;
+#   19:43 UTC = 12:43 pm MST (1:43 pm MDT): a reminder, posted only if a decision is due
+#               before tonight's games.
 # Every --post run also posts lock-feedback messages to #daily-locks for any day whose games are
 # all final, and reads the 🔒 reactions on earlier ones (idempotent; see lock_feedback.py).
 # And on every push that can change a recommendation -- the model, the league rules, the
@@ -18,7 +22,8 @@ name: nightly advisor
 
 on:
   schedule:
-    - cron: "43 7 * * *"
+    - cron: "47 12 * * *"  # 6:47 am MDT
+    - cron: "47 13 * * *"  # 6:47 am MST
     - cron: "43 19 * * *"
   push:
     branches: [main]
@@ -51,13 +56,28 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
+      - name: Morning gate (one of the two morning schedules matches Denver's clock)
+        id: gate
+        env:
+          SCHEDULE: ${{ github.event.schedule }}
+        run: |
+          zone=$(TZ=America/Denver date +%Z)
+          run=yes
+          if [ "$SCHEDULE" = "47 12 * * *" ] && [ "$zone" != "MDT" ]; then run=no; fi
+          if [ "$SCHEDULE" = "47 13 * * *" ] && [ "$zone" != "MST" ]; then run=no; fi
+          echo "Denver is on $zone; schedule '${SCHEDULE:-none}'; run=$run"
+          echo "run=$run" >> "$GITHUB_OUTPUT"
       - uses: actions/checkout@v5
+        if: steps.gate.outputs.run == 'yes'
       - uses: actions/setup-python@v6
+        if: steps.gate.outputs.run == 'yes'
         with:
           python-version: "3.11"
       - name: Install uv
+        if: steps.gate.outputs.run == 'yes'
         run: python -m pip install uv
       - name: Refresh this season's logs and the board from Sleeper
+        if: steps.gate.outputs.run == 'yes'
         id: refresh
         continue-on-error: true
         run: |
@@ -66,6 +86,7 @@ jobs:
           uv run --python 3.11 python -m engine.jobs.refresh_current_season
           uv run --python 3.11 python -m engine.jobs.build_board
       - name: Run the advisor and post to Discord
+        if: steps.gate.outputs.run == 'yes'
         env:
           REFRESH: ${{ steps.refresh.outcome }}
           DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
