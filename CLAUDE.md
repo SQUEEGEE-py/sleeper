@@ -58,7 +58,7 @@ pushed.
 Everything runnable today, in the order you would use it:
 
 ```
-uv run pytest                                             # 463 tests, none need the network
+uv run pytest                                             # 474 tests, none need the network
 uv run python -m engine.jobs.verify_league                # config vs live Sleeper; exits 1 on drift
 uv run python -m engine.jobs.ingest_history [--force]     # LOCAL ONLY: logs + schedule -> parquet
 uv run python -m engine.jobs.build_board [--top 150]      # -> data/board/{board.csv,board.html,pool.csv}
@@ -77,7 +77,7 @@ uv run python -m engine.jobs.lock_feedback                             # check t
 
 Per-file test counts: scoring 89, distributions 39, lockin 37, nba_stats 26, lineup 25,
 player_ids 23, draft_sim 29, lock_sheet 17, rookies 15, valuation 11, draft_live 11,
-verify_league 8, runtime 4, matchup 17, locks 10, nightly 11, alerts 12, resolve_scoring 5, aging 7, roles 6, roster_moves 10, nightly_roster 6, trades 8, http_retry 5, lineup_moves 19, lock_feedback 9, sleeper_logs 5.
+verify_league 8, runtime 4, matchup 17, locks 10, nightly 11, alerts 12, resolve_scoring 5, aging 7, roles 10, roster_moves 14, nightly_roster 9, trades 8, http_retry 5, lineup_moves 19, lock_feedback 9, sleeper_logs 5.
 
 `data/` is gitignored and regenerable. **On a fresh checkout run `ingest_history` then
 `build_board` before anything else** -- the 2026-10-16 session started with no `data/` at all.
@@ -957,6 +957,32 @@ LeBron Sat 38.7 -> 34.0, Kyrie Fri 34.8 -> 30.6); starting nine week value 482.9
    by a turnover; the 110 extra were 10/25 games the old file pulled mid-day. 3132 player-games
    to 11/7. Board rebuilt (511 players); snapshot published 2026-11-08. 5 tests; 4 mutations
    fail them. Next step if wanted: run it weekly from Actions.
+   **Pickups, position cover and the role factor (user request, 2026-11-15).** The user had
+   12 active players plus Kawhi and Caleb Wilson in IR (one open spot), and the report said "no
+   free agent beats your bench": pickups always assumed a drop, and valued a bench player only
+   as a starter. The roster also had **two C slots and exactly two C-eligible players**.
+   - **Pickups are now valued on the expected lineup with absences** (`roster_moves.py`):
+     each active player misses a whole week with probability `week_out_probability(p_play)`,
+     measured on 2023-26 rotation players (8.4% of 17,922 player-weeks; 20% under 0.6
+     p_play, 1% over 0.95; an absent week is followed by another 55% of the time). Absence
+     sets of up to 2 are enumerated exactly and renormalised (deterministic, ~10 s for the
+     whole report). An add into an open spot needs `OPEN_SPOT_MIN_GAIN` 0.25/week; a swap
+     tries each bench drop and needs `PICKUP_MIN_GAIN` 1.0 (was 2.0 VOR). IR players take no
+     spot; an active Out player counts as absent. Each pickup shows this season's games,
+     minutes and fp.
+   - **Cover alerts**: a starting position empty in 2%+ of weeks. Live: "No backup at C ...
+     about 6% of weeks", best cover Gobert / Carter, +2.1/week each. Discord shows it daily
+     until covered.
+   - **Role factor** (`roles.role_factor`, in `PlayerModel` with `season=`): veterans scaled
+     by `(minutes now / most recent earlier season with 10+ games) ** (0.65 x earlier share)`,
+     from 5 games this season. Backtested 2024-26 at team games 8/12/20/35/50: MAE
+     4.80->4.44, 4.71->4.30, 4.43->4.14, 4.27->4.06, 4.42->4.35; 0.65 within 0.02 of the best
+     exponent everywhere; unfaded was worse than nothing by game 50. Effect: Vucevic 35.9 ->
+     22.1, Filipowski 35.0 -> 20.4, DeRozan 39.1 -> 34.0, Lillard 46.6 -> 42.4, Fears 43.7 ->
+     46.2, Trae Young 46.9 -> 54.8. Minutes only: Jalen Green (more minutes, worse play) rose.
+   - Not done: planning drops for IR returns (both IR players back = two drops once the open
+     spot is filled). 10 mutations fail the suite.
+
    **Step 7 is done.** Open follow-up from it: the late-season availability drop for weeks
    22-24 (above).
 
