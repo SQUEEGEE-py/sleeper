@@ -17,7 +17,10 @@ from engine.jobs.lock_feedback import (
     lock_reacted,
     locks_from_messages,
     parse_tag,
+    posted_for_of,
     posted_keys,
+    posted_post_keys,
+    superseded,
     to_post,
 )
 from engine.jobs.lock_sheet import GameSlot
@@ -97,11 +100,63 @@ def test_unreadable_content_fails_loudly_instead_of_meaning_no_locks() -> None:
         locks_from_messages([msg("a", BROWN, content="")], 3, HOOK, {}, None)
 
 
-def test_posting_is_idempotent() -> None:
-    posted = posted_keys([msg("a", BROWN), msg("z", BROWN, webhook_id="other")], HOOK)
-    assert posted == {(3, "2026-11-02", "1711")}
+def test_posting_is_idempotent_within_a_batch() -> None:
+    messages = [msg("a", BROWN), msg("z", BROWN, webhook_id="other")]
+    assert posted_keys(messages, HOOK) == {(3, "2026-11-02", "1711")}
+    posted = posted_post_keys(messages, HOOK)
+    assert posted == {(3, "2026-11-02", "1711", "2026-11-02")}  # an old tag: posted for its game day
     wilson = Candidate(3, MON, "4862", "Caleb Wilson", "UTIL#1", 51.0)
     assert to_post([BROWN, wilson], posted) == [wilson]
+
+
+def test_a_player_still_open_is_in_the_next_days_batch_too() -> None:
+    from dataclasses import replace
+    # Brown rolled on Monday's 59.5 and had no game Tuesday: Tuesday's batch asks again.
+    tuesday = replace(BROWN, posted_for=TUE)
+    text = format_message(tuesday)
+    assert "Still open" in text and parse_tag(text) == (3, MON, "1711", "F#1", 59.5)
+    assert posted_for_of(text) == TUE and posted_for_of(format_message(BROWN)) == MON
+    assert to_post([tuesday], posted_post_keys([msg("a", BROWN)], HOOK)) == [tuesday]
+    assert to_post([tuesday], posted_post_keys([msg("b", tuesday)], HOOK)) == []  # once per batch
+    assert "Still open" not in format_message(replace(BROWN, posted_for=MON))
+
+
+def test_only_unreacted_earlier_messages_for_the_same_game_are_superseded() -> None:
+    from dataclasses import replace
+    tuesday = replace(BROWN, posted_for=TUE)
+    wilson = Candidate(3, MON, "4862", "Caleb Wilson", "UTIL#1", 51.0)
+    messages = [
+        msg("old", BROWN),                                         # replaced by Tuesday's
+        msg("locked", BROWN, lock_reaction(1, me=False)),          # a lock: never touched
+        msg("seed", BROWN, lock_reaction(1, me=True)),             # only the bot's: still replaceable
+        msg("new", tuesday),                                       # the one just posted
+        msg("other", wilson),                                      # not reposted
+        msg("theirs", BROWN, webhook_id="other"),                  # not ours
+        msg("lastweek", replace(BROWN, week=2)),                   # another week's game
+    ]
+    assert superseded(messages, HOOK, [tuesday], keep={"new"}) == ["old", "seed"]
+
+
+def test_delete_rechecks_for_a_new_lock_first() -> None:
+    calls: list[tuple[str, str]] = []
+    reacted = {"m1": False, "m2": True}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        path = request.url.path
+        calls.append((request.method, path))
+        if path == "/api/webhooks/900/tok":
+            return httpx.Response(200, json={"id": HOOK, "channel_id": "42"})
+        if request.method == "GET" and path.startswith("/api/v10/channels/42/messages/"):
+            mid = path.rsplit("/", 1)[1]
+            return httpx.Response(200, json=msg(mid, BROWN, lock_reaction(1, me=False) if reacted[mid] else None))
+        if request.method == "DELETE":
+            return httpx.Response(204)
+        return httpx.Response(404)
+
+    client = LockFeedback("https://discord.com/api/webhooks/900/tok", "sekrit",
+                          http=httpx.Client(transport=httpx.MockTransport(handler)))
+    assert client.delete("m1") and not client.delete("m2")
+    assert [p for m, p in calls if m == "DELETE"] == ["/api/webhooks/900/tok/messages/m1"]
 
 
 def starter(pid, name, completed, upcoming=True, in_progress=False, lock=None, played=None) -> Starter:

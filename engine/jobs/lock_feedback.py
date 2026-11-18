@@ -14,9 +14,18 @@ user. Before this he edited ``state/locks.json`` and pushed; now:
 3. Every later run reads this week's messages back, and a 🔒 on one is a lock at the tagged
    score, game and slot. ``state/locks.json`` still works and is merged in.
 
+**Every open starter, every day (user request, 2026-11-18).** At first a player was asked about
+once, on the day of his latest game, so a player who rolled on Monday's score and had no game
+Tuesday was missing from Tuesday's batch -- the day's messages looked like "only the ones the
+advisor says to lock". Now each batch is for the latest day whose games are all final
+(``posted_for``, in the tag as ``p2026-11-17``) and holds every starter still open, whichever
+day his latest game was. When a player is posted again, his earlier messages for the same game
+that carry no 🔒 are deleted, so the channel shows one current message per open player. A 🔒
+on any message for that game still counts (same score, same game).
+
 The channel is the state: nothing is stored in the repo, and posting is idempotent (a message
-already in the channel for that week, day and player is not posted again), so a late,
-repeated or push-triggered run is harmless.
+already in the channel for that week, game, player and batch day is not posted again), so a
+late, repeated or push-triggered run is harmless.
 
 Why a bot as well as a webhook (decided 2026-11-05): a webhook can post, but cannot list a
 channel, so it could only read back messages whose ids were stored somewhere between runs. A
@@ -66,7 +75,7 @@ PAGE = 100
 MAX_PAGES = 10  # a week is ~30-60 messages; 1000 is a runaway guard, not a limit in practice
 
 TAG = re.compile(r"lock w(?P<week>\d+) (?P<day>\d{4}-\d{2}-\d{2}) (?P<pid>\S+) (?P<slot>\S+) "
-                 r"(?P<score>-?\d+(?:\.\d+)?)")
+                 r"(?P<score>-?\d+(?:\.\d+)?)(?: p(?P<posted>\d{4}-\d{2}-\d{2}))?")
 
 
 @dataclass(frozen=True)
@@ -80,10 +89,15 @@ class Candidate:
     slot: str           # "F#1": the lineup slot label, as lineup.starting_slots names it
     score: float
     advice: str = ""    # the advisor's call, e.g. "LOCK (win 74% if locked / 70% if rolled)"
+    posted_for: date | None = None  # the batch: the latest day whose games are all final
 
     @property
     def key(self) -> tuple[int, str, str]:
         return (self.week, self.game_date.isoformat(), self.player_id)
+
+    @property
+    def post_key(self) -> tuple[int, str, str, str]:
+        return (*self.key, (self.posted_for or self.game_date).isoformat())
 
 
 @dataclass(frozen=True)
@@ -99,11 +113,14 @@ class FeedbackLock:
 
 
 def tag(c: Candidate) -> str:
-    return f"lock w{c.week} {c.game_date.isoformat()} {c.player_id} {c.slot} {c.score:g}"
+    base = f"lock w{c.week} {c.game_date.isoformat()} {c.player_id} {c.slot} {c.score:g}"
+    return base if c.posted_for is None else f"{base} p{c.posted_for.isoformat()}"
 
 
 def format_message(c: Candidate) -> str:
     lines = [f"**{c.name}** ({slot_position(c.slot)}) -- **{c.score:g}** on {c.game_date:%a %m/%d}"]
+    if c.posted_for is not None and c.posted_for != c.game_date:
+        lines.append("Still open: not locked, no game since.")
     if c.advice:
         lines.append(f"Advisor: {c.advice}")
     lines.append(f"React {LOCK_EMOJI} if you locked him.")
@@ -117,6 +134,14 @@ def parse_tag(content: str) -> tuple[int, date, str, str, float] | None:
         return None
     return (int(match["week"]), date.fromisoformat(match["day"]), match["pid"], match["slot"],
             float(match["score"]))
+
+
+def posted_for_of(content: str) -> date | None:
+    """The batch day in a tag; a tag from before batches existed was posted for its game day."""
+    match = TAG.search(content or "")
+    if match is None:
+        return None
+    return date.fromisoformat(match["posted"] or match["day"])
 
 
 def _name_from(content: str) -> str:
@@ -142,6 +167,35 @@ def posted_keys(messages: Iterable[dict], webhook_id: str) -> set[tuple[int, str
         if parsed:
             keys.add((parsed[0], parsed[1].isoformat(), parsed[2]))
     return keys
+
+
+def posted_post_keys(messages: Iterable[dict], webhook_id: str) -> set[tuple[int, str, str, str]]:
+    """(week, game day, player, batch day) for each of our messages -- the posting dedupe key."""
+    keys = set()
+    for m in messages:
+        if m.get("webhook_id") != webhook_id:
+            continue
+        parsed = parse_tag(m.get("content", ""))
+        if parsed:
+            keys.add((parsed[0], parsed[1].isoformat(), parsed[2],
+                      posted_for_of(m["content"]).isoformat()))  # type: ignore[union-attr]
+    return keys
+
+
+def superseded(messages: Iterable[dict], webhook_id: str, reposted: Iterable[Candidate],
+               keep: set[str]) -> list[str]:
+    """Ids of our earlier messages for the same week, game and player as a candidate just
+    posted again, with no 🔒 on them: the new message replaces them. A reacted one is a lock
+    and is never touched; ``keep`` holds the ids just posted."""
+    wanted = {c.key for c in reposted}
+    out = []
+    for m in messages:
+        if m.get("webhook_id") != webhook_id or m.get("id") in keep or lock_reacted(m):
+            continue
+        parsed = parse_tag(m.get("content", ""))
+        if parsed and (parsed[0], parsed[1].isoformat(), parsed[2]) in wanted:
+            out.append(str(m["id"]))
+    return out
 
 
 def locks_from_messages(messages: Iterable[dict], week: int, webhook_id: str,
@@ -190,6 +244,7 @@ class LockFeedback:
         self._http = http or httpx.Client(timeout=15.0)
         self._bot = {"Authorization": f"Bot {bot_token}", "User-Agent": USER_AGENT}
         self._webhook: dict | None = None
+        self.messages: list[dict] = []  # this week's channel messages, from read_week
 
     @classmethod
     def from_env(cls) -> "LockFeedback | None":
@@ -248,6 +303,7 @@ class LockFeedback:
                   ) -> tuple[dict[str, FeedbackLock], list[str], set[tuple[int, str, str]]]:
         """This week's locks, any gaps, and the (week, day, player) keys already posted."""
         messages = self.messages_since(since)
+        self.messages = messages
         ours = [m for m in messages if m.get("webhook_id") == self.webhook_id]
         self.remove_own_reactions(ours)
         reactors = ({m["id"]: self._reactors(m["id"]) for m in ours if lock_reacted(m)}
@@ -281,8 +337,22 @@ class LockFeedback:
         return str(message["id"])
 
 
-def to_post(candidates: Iterable[Candidate], posted: set[tuple[int, str, str]]) -> list[Candidate]:
-    return [c for c in candidates if c.key not in posted]
+    def delete(self, message_id: str) -> bool:
+        """Delete one of the webhook's own messages (no bot permission needed), unless a 🔒 has
+        appeared on it since it was read. Best effort."""
+        try:
+            if lock_reacted(self._get(f"{API}/channels/{self.channel_id}/messages/{message_id}")):
+                return False
+            request_with_retry(lambda: self._http.delete(f"{self.webhook_url}/messages/{message_id}",
+                                                         headers={"User-Agent": USER_AGENT}))
+            return True
+        except httpx.HTTPError as error:
+            print(f"lock feedback: could not delete superseded message {message_id} ({error})", file=sys.stderr)
+            return False
+
+
+def to_post(candidates: Iterable[Candidate], posted: set[tuple[int, str, str, str]]) -> list[Candidate]:
+    return [c for c in candidates if c.post_key not in posted]
 
 
 def check(feedback: LockFeedback) -> int:
