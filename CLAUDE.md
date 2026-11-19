@@ -53,7 +53,8 @@ league. **Step 6 is done** (2026-10-22): age curve and role watch. **Step 7 is d
 
 **Working agreement for phase 3:** do the steps in order and **stop after each one** for the
 user to review. Commits are `phase3: <what>`. The user asks before anything is committed or
-pushed.
+pushed. **Pull requests (user, 2026-11-19): open them automatically when work is pushed**, and
+tell the user which PRs are waiting for their approval; the user merges.
 
 Everything runnable today, in the order you would use it:
 
