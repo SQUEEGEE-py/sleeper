@@ -35,7 +35,7 @@ import json
 import os
 import sys
 import traceback
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import date, datetime, timezone
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -48,7 +48,8 @@ from engine.ingest.nba_stats import DATA_DIR, GAME_TYPE_REGULAR, previous_season
 from engine.ingest.sleeper import INJURY_STATUS_TTL_SECONDS, Matchup, Player, ScheduledGame, SleeperClient
 from engine.jobs.build_board import load_logs
 from engine.jobs.discord import WEBHOOK_ENV, post, webhook_url
-from engine.jobs.lock_feedback import LOCK_EMOJI, LOCKS_WEBHOOK_ENV, BOT_TOKEN_ENV, FeedbackLock, LockFeedback, to_post
+from engine.jobs.lock_feedback import (LOCK_EMOJI, LOCKS_WEBHOOK_ENV, BOT_TOKEN_ENV, FeedbackLock, LockFeedback,
+                                       posted_post_keys, superseded, to_post)
 from engine.jobs.lock_feedback import Candidate as LockCandidate
 from engine.jobs.lock_sheet import GameSlot, games_p_play, my_roster, parse_birth_date, team_week_games
 from engine.jobs.runtime import log_exception, utf8_output
@@ -1134,12 +1135,18 @@ def run(args: argparse.Namespace) -> int:
             status_by_date: dict[str, set[str]] = {}
             for g in games:
                 status_by_date.setdefault(g.date, set()).add(g.status)
-            new = to_post(feedback_candidates(week, mine, slots, status_by_date, decisions,
-                                                 datetime.now(timezone.utc)), posted)
-            for candidate in new:
-                feedback.post(candidate)
+            final_days = [d for d, st in status_by_date.items() if st == {"complete"} and d <= today.isoformat()]
+            batch = date.fromisoformat(max(final_days)) if final_days else None
+            candidates = [replace(c, posted_for=batch) for c in
+                          feedback_candidates(week, mine, slots, status_by_date, decisions,
+                                              datetime.now(timezone.utc))]
+            new = to_post(candidates, posted_post_keys(feedback.messages, feedback.webhook_id))
+            new_ids = {feedback.post(candidate) for candidate in new}
+            stale = superseded(feedback.messages, feedback.webhook_id, new, new_ids)
+            removed = sum(feedback.delete(mid) for mid in stale)
             print(f"\nlock feedback: posted {len(new)} to #daily-locks"
-                  + (f" ({', '.join(c.name for c in new)})" if new else ""))
+                  + (f" ({', '.join(c.name for c in new)})" if new else "")
+                  + (f"; removed {removed} superseded" if stale else ""))
     if feedback is not None:
         feedback.close()
     return 0

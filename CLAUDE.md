@@ -53,12 +53,13 @@ league. **Step 6 is done** (2026-10-22): age curve and role watch. **Step 7 is d
 
 **Working agreement for phase 3:** do the steps in order and **stop after each one** for the
 user to review. Commits are `phase3: <what>`. The user asks before anything is committed or
-pushed.
+pushed. **Pull requests (user, 2026-11-19): open them automatically when work is pushed**, and
+tell the user which PRs are waiting for their approval; the user merges.
 
 Everything runnable today, in the order you would use it:
 
 ```
-uv run pytest                                             # 474 tests, none need the network
+uv run pytest                                             # 477 tests, none need the network
 uv run python -m engine.jobs.verify_league                # config vs live Sleeper; exits 1 on drift
 uv run python -m engine.jobs.ingest_history [--force]     # LOCAL ONLY: logs + schedule -> parquet
 uv run python -m engine.jobs.build_board [--top 150]      # -> data/board/{board.csv,board.html,pool.csv}
@@ -77,7 +78,7 @@ uv run python -m engine.jobs.lock_feedback                             # check t
 
 Per-file test counts: scoring 89, distributions 39, lockin 37, nba_stats 26, lineup 25,
 player_ids 23, draft_sim 29, lock_sheet 17, rookies 15, valuation 11, draft_live 11,
-verify_league 8, runtime 4, matchup 17, locks 10, nightly 11, alerts 12, resolve_scoring 5, aging 7, roles 10, roster_moves 14, nightly_roster 9, trades 8, http_retry 5, lineup_moves 19, lock_feedback 9, sleeper_logs 5.
+verify_league 8, runtime 4, matchup 17, locks 10, nightly 11, alerts 12, resolve_scoring 5, aging 7, roles 10, roster_moves 14, nightly_roster 9, trades 8, http_retry 5, lineup_moves 19, lock_feedback 12, sleeper_logs 5.
 
 `data/` is gitignored and regenerable. **On a fresh checkout run `ingest_history` then
 `build_board` before anything else** -- the 2026-10-16 session started with no `data/` at all.
@@ -918,6 +919,14 @@ LeBron Sat 38.7 -> 34.0, Kyrie Fri 34.8 -> 30.6); starting nine week value 482.9
    `python -m engine.jobs.lock_feedback` once the secrets exist. 9 tests; 5 mutations fail them.
    **Probed 2026-11-05** (`lock_feedback_check.yml`, run 41966848717): token, webhook channel,
    reading, Message Content all work; the first live run posted 7 messages for Wed 11/4.
+   **Every open starter in every batch (user, 2026-11-18).** A player was asked about only on
+   the day of his latest game, so Tuesday's batch held just Lillard and George (Tuesday games)
+   while Durant, Jokic and Bam, rolling on Monday's scores, were missing -- it read as "only the
+   ones it says to lock". Each batch is now for the latest all-final day (tag suffix
+   `p2026-11-17`; old tags count as posted for their game day) and holds every open starter;
+   posting is idempotent per (week, game, player, batch day). Reposting deletes that player's
+   earlier unreacted messages for the same game through the webhook, after re-reading each one
+   so a fresh 🔒 is never deleted. 3 tests; 4 mutations fail the suite.
    **One decision per slot (user, 2026-11-05).** The report said LOCK LeBron 40 *and* start
    Jalen Green in his slot on Thursday: decisions and auditions were computed apart. Now an
    audition on a starter with an open decision is folded into that decision
