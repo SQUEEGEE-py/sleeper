@@ -739,6 +739,15 @@ LeBron Sat 38.7 -> 34.0, Kyrie Fri 34.8 -> 30.6); starting nine week value 482.9
      UTC on 2026-11-15, user's choice of "7 AM MT"; cron is UTC-only, so `47 12` serves MDT and
      `47 13` MST and a "morning gate" step skips the one that does not match Denver's clock),
      19:43 UTC reminder only if a decision is due that day, plus manual runs. Both workflows on checkout v5 / setup-python v6.
+     **On-time trigger moved to Cloudflare (user request, 2026-11-27):** GitHub `schedule:` runs
+     start late, so `cloudflare/advisor-trigger/` (a free-plan Worker, deployed through the
+     Cloudflare API) has Cron Triggers at 12:47 / 13:47 / 19:43 UTC that call `workflow_dispatch`
+     with `trigger=cloudflare-morning|cloudflare-reminder`; the Worker does the Denver-clock check
+     for the morning pair. The `schedule:` entries became backups 30 min later (13:17 / 14:17 /
+     20:13 UTC) with a "backup check" step that skips when a non-failed Worker run of the same
+     kind started in the last 3 h (`run-name` carries the trigger). Worker secrets
+     `GITHUB_TOKEN` (fine-grained, Actions read/write, this repo) and `DISCORD_WEBHOOK_URL` are
+     entered by the user in the Cloudflare dashboard; a failed dispatch posts to Discord.
    - **Re-run on model change** (user request, 2026-10-22, after the age adjustment flipped
      Kawhi from ROLL to LOCK with no explanation in Discord): any push touching
      `engine/model/**`, `engine/ingest/**`, `nightly.py`, `lock_sheet.py`, `build_board.py`,
