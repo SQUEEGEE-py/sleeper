@@ -70,7 +70,7 @@ uv run python -m engine.jobs.draft_live [--draft-id <mock id>] [--slot N] # -> d
 uv run python -m engine.jobs.lock_sheet [--week N]                      # -> data/lock/lock_sheet.html
 uv run python -m engine.jobs.nightly [--week N] [--post]                # win prob + LOCK/ROLL; --post -> Discord
 uv run python -m engine.jobs.refresh_current_season                    # this season's logs + week grid from Sleeper; cloud-safe
-uv run python -m engine.jobs.publish_snapshot                           # data/ -> snapshot/ for Actions; commit it
+uv run python -m engine.jobs.publish_snapshot                           # data/ -> snapshot/; automatic weekly in Actions
 uv run python -m engine.jobs.probe_endpoints                            # stdlib only; also runs in Actions
 uv run python -m engine.jobs.resolve_scoring                            # flags vs Sleeper counted scores
 uv run python -m engine.jobs.lock_feedback                             # check the Discord lock-feedback setup
@@ -973,7 +973,13 @@ LeBron Sat 38.7 -> 34.0, Kyrie Fri 34.8 -> 30.6); starting nine week value 482.9
    snapshot). The advisor reads `data/nba` + `data/board/pool.csv`. If either step fails
    (Sleeper down, or the refresh's own 3% / 0.5 fp check refuses), it falls back to `snapshot/`
    and the report lists the failure as a gap (`nightly --note`). The snapshot is no longer a
-   weekly chore; republish it now and then so the fallback and comparison base stay recent.
+   weekly chore. **Republished automatically since 2026-11-27** (user request):
+   `.github/workflows/refresh_snapshot.yml`, Mondays 10:23 UTC and by hand, runs refresh +
+   `build_board` + `publish_snapshot` and pushes `snapshot/` to `main` as
+   `phase3: weekly snapshot refresh [skip ci]` (`[skip ci]` so it does not trigger the
+   re-run-on-snapshot report). It commits only when a data file changed, not the manifest
+   alone; a failed refresh fails the run and commits nothing. Needs `contents: write`, and
+   breaks if `main` ever gets branch protection that blocks the Actions bot.
    **Pickups, position cover and the role factor (user request, 2026-11-15).** The user had
    12 active players plus Kawhi and Caleb Wilson in IR (one open spot), and the report said "no
    free agent beats your bench": pickups always assumed a drop, and valued a bench player only
