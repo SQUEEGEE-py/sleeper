@@ -5,16 +5,15 @@
 # falls back to snapshot/ as committed and the report says so.
 #
 # GitHub starts scheduled runs late (usually 5-20 minutes, once 7 hours), and only in UTC. So:
-#   morning, 6:47 am Mountain (user's choice 2026-11-15: "7 AM MT", scheduled a little early so
-#               it lands near 7): the full report -- odds and every open LOCK/ROLL call. Last
-#               night's games are final and waivers (about 3 am ET) have run. Mountain time is
-#               UTC-6 in summer time (MDT: the season to Oct 31, and from Mar 14) and UTC-7 in
-#               winter (MST), and cron cannot follow that, so there are two schedules and the
-#               "morning gate" step skips whichever does not match Denver's clock today;
-#   19:43 UTC = 12:43 pm MST (1:43 pm MDT): a reminder, posted only if a decision is due
-#               before tonight's games.
+#   7:00 am Mountain, once a day (user's choice 2026-11-27: one message a day, the afternoon
+#               reminder dropped): the full report -- odds and every open LOCK/ROLL call -- and
+#               the #daily-locks batch. Last night's games are final and waivers (about 3 am ET)
+#               have run. Mountain time is UTC-6 in summer time (MDT: the season to Oct 31, and
+#               from Mar 14) and UTC-7 in winter (MST), and cron cannot follow that, so there
+#               are two schedules and the "morning gate" step skips whichever does not match
+#               Denver's clock today.
 # The on-time trigger is a Cloudflare Worker (cloudflare/advisor-trigger, 2026-11-27): its Cron
-# Triggers fire at 6:47 am MT and 19:43 UTC and start this workflow through workflow_dispatch,
+# Triggers fire at 7:00 am MT and start this workflow through workflow_dispatch,
 # which, unlike `schedule:`, starts within seconds. The `schedule:` entries below are now a
 # BACKUP, 30 minutes later: the "backup check" step skips one when the Worker's run of the same
 # kind started in the last 3 hours and did not fail.
@@ -29,9 +28,8 @@ run-name: ${{ inputs.trigger && format('nightly advisor ({0})', inputs.trigger) 
 on:
   schedule:
     # Backups for the Cloudflare trigger, 30 minutes after it (see the top of this file).
-    - cron: "17 13 * * *"  # 7:17 am MDT
-    - cron: "17 14 * * *"  # 7:17 am MST
-    - cron: "13 20 * * *"
+    - cron: "30 13 * * *"  # 7:30 am MDT
+    - cron: "30 14 * * *"  # 7:30 am MST
   push:
     branches: [main]
     paths:
@@ -47,11 +45,11 @@ on:
   workflow_dispatch:
     inputs:
       only_if_due_today:
-        description: "Post only decisions due today (the afternoon reminder)"
+        description: "Post only decisions due today (manual use; the scheduled reminder was dropped 2026-11-27)"
         type: boolean
         default: false
       trigger:
-        description: "Who started this run (cloudflare-morning / cloudflare-reminder from the Worker)"
+        description: "Who started this run (cloudflare-morning from the Worker)"
         type: string
         default: manual
 
@@ -75,8 +73,8 @@ jobs:
         run: |
           zone=$(TZ=America/Denver date +%Z)
           run=yes
-          if [ "$SCHEDULE" = "17 13 * * *" ] && [ "$zone" != "MDT" ]; then run=no; fi
-          if [ "$SCHEDULE" = "17 14 * * *" ] && [ "$zone" != "MST" ]; then run=no; fi
+          if [ "$SCHEDULE" = "30 13 * * *" ] && [ "$zone" != "MDT" ]; then run=no; fi
+          if [ "$SCHEDULE" = "30 14 * * *" ] && [ "$zone" != "MST" ]; then run=no; fi
           echo "Denver is on $zone; schedule '${SCHEDULE:-none}'; run=$run"
           echo "run=$run" >> "$GITHUB_OUTPUT"
       - name: Backup check (skip if the Cloudflare trigger already ran)
@@ -84,10 +82,8 @@ jobs:
         if: steps.gate.outputs.run == 'yes' && github.event_name == 'schedule'
         env:
           GH_TOKEN: ${{ github.token }}
-          SCHEDULE: ${{ github.event.schedule }}
         run: |
           kind=morning
-          if [ "$SCHEDULE" = "13 20 * * *" ]; then kind=reminder; fi
           since=$(date -u -d '-3 hours' +%Y-%m-%dT%H:%M:%SZ)
           found=$(gh api "repos/${{ github.repository }}/actions/workflows/nightly.yml/runs?event=workflow_dispatch&per_page=30" \
             --jq "[.workflow_runs[] | select(.display_title == \"nightly advisor (cloudflare-$kind)\" and .created_at > \"$since\" and (.status != \"completed\" or .conclusion == \"success\"))] | length")
@@ -132,7 +128,7 @@ jobs:
           COMMIT_MESSAGE: ${{ github.event.head_commit.message }}
         run: |
           flag=""
-          if [ "$SCHEDULE" = "13 20 * * *" ] || [ "$DUE_TODAY_INPUT" = "true" ]; then
+          if [ "$DUE_TODAY_INPUT" = "true" ]; then
             flag="--only-if-due-today"
           fi
           reason=""
