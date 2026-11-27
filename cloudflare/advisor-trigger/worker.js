@@ -9,15 +9,15 @@
 //   GITHUB_TOKEN         fine-grained token, this repository only, Actions: read and write
 //   DISCORD_WEBHOOK_URL  the advisor's webhook; a failed dispatch is posted there
 //
-// Cron Triggers are UTC. The morning report is 6:47 am America/Denver, which is 12:47 UTC in
-// summer time (MDT) and 13:47 UTC in winter (MST): both fire, and only the one that is 6:47 on
-// Denver's clock dispatches.
+// Cron Triggers are UTC. The one daily report is 7:00 am America/Denver (user's choice,
+// 2026-11-27: one message a day, no afternoon reminder), which is 13:00 UTC in summer time
+// (MDT) and 14:00 UTC in winter (MST): both fire, and only the one that is 7 am on Denver's
+// clock dispatches.
 
 const REPO = "SQUEEGEE-py/sleeper";
 const WORKFLOW = "nightly.yml";
-const MORNING_CRONS = ["47 12 * * *", "47 13 * * *"];
-const REMINDER_CRON = "43 19 * * *";
-const MORNING_HOUR_DENVER = 6;
+const MORNING_CRONS = ["0 13 * * *", "0 14 * * *"];
+const MORNING_HOUR_DENVER = 7;
 
 export function denverHour(date) {
   const hour = new Intl.DateTimeFormat("en-US", {
@@ -32,7 +32,6 @@ export function planFor(cron, date) {
     if (denverHour(date) !== MORNING_HOUR_DENVER) return null;
     return { trigger: "cloudflare-morning", onlyIfDueToday: false };
   }
-  if (cron === REMINDER_CRON) return { trigger: "cloudflare-reminder", onlyIfDueToday: true };
   return null;
 }
 

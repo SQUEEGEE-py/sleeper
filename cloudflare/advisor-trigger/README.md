@@ -2,17 +2,19 @@
 
 Starts `.github/workflows/nightly.yml` on time. GitHub's own `schedule:` runs start 5-30
 minutes late (once 7 hours) and only in UTC; a `workflow_dispatch` through the API starts within
-seconds. Free Workers plan: three Cron Triggers, three requests a day.
+seconds. Free Workers plan: two Cron Triggers, two requests a day.
+
+One report a day at **7:00 am America/Denver** (user's choice, 2026-11-27; the afternoon
+reminder was dropped):
 
 | Cron (UTC) | Does |
 |---|---|
-| `47 12 * * *` | morning report, only when it is 6:47 am in Denver (MDT) |
-| `47 13 * * *` | morning report, only when it is 6:47 am in Denver (MST) |
-| `43 19 * * *` | afternoon reminder (`only_if_due_today`) |
+| `0 13 * * *` | daily report, only when it is 7 am in Denver (MDT) |
+| `0 14 * * *` | daily report, only when it is 7 am in Denver (MST) |
 
-Runs it starts are named `nightly advisor (cloudflare-morning)` / `(cloudflare-reminder)`.
-`nightly.yml` keeps its own schedule 30 minutes later as a backup, which skips itself when the
-Worker's run of the same kind started in the last 3 hours and did not fail. A failed dispatch
+Runs it starts are named `nightly advisor (cloudflare-morning)`.
+`nightly.yml` keeps its own schedule 30 minutes later (7:30 am MT) as a backup, which skips
+itself when the Worker's run started in the last 3 hours and did not fail. A failed dispatch
 is posted to Discord.
 
 ## Secrets (entered by the user in the Cloudflare dashboard, never committed)
