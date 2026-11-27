@@ -13,18 +13,25 @@
 #               "morning gate" step skips whichever does not match Denver's clock today;
 #   19:43 UTC = 12:43 pm MST (1:43 pm MDT): a reminder, posted only if a decision is due
 #               before tonight's games.
+# The on-time trigger is a Cloudflare Worker (cloudflare/advisor-trigger, 2026-11-27): its Cron
+# Triggers fire at 6:47 am MT and 19:43 UTC and start this workflow through workflow_dispatch,
+# which, unlike `schedule:`, starts within seconds. The `schedule:` entries below are now a
+# BACKUP, 30 minutes later: the "backup check" step skips one when the Worker's run of the same
+# kind started in the last 3 hours and did not fail.
 # Every --post run also posts lock-feedback messages to #daily-locks for any day whose games are
 # all final, and reads the 🔒 reactions on earlier ones (idempotent; see lock_feedback.py).
 # And on every push that can change a recommendation -- the model, the league rules, the
 # snapshot it reads, or the advisor itself -- a full report headed with the commit's subject,
 # so a call that flips is explained by the change that flipped it.
 name: nightly advisor
+run-name: ${{ inputs.trigger && format('nightly advisor ({0})', inputs.trigger) || 'nightly advisor' }}
 
 on:
   schedule:
-    - cron: "47 12 * * *"  # 6:47 am MDT
-    - cron: "47 13 * * *"  # 6:47 am MST
-    - cron: "43 19 * * *"
+    # Backups for the Cloudflare trigger, 30 minutes after it (see the top of this file).
+    - cron: "17 13 * * *"  # 7:17 am MDT
+    - cron: "17 14 * * *"  # 7:17 am MST
+    - cron: "13 20 * * *"
   push:
     branches: [main]
     paths:
@@ -43,9 +50,14 @@ on:
         description: "Post only decisions due today (the afternoon reminder)"
         type: boolean
         default: false
+      trigger:
+        description: "Who started this run (cloudflare-morning / cloudflare-reminder from the Worker)"
+        type: string
+        default: manual
 
 permissions:
   contents: read
+  actions: read  # the backup check lists this workflow's runs
 
 concurrency:
   group: nightly
@@ -63,21 +75,40 @@ jobs:
         run: |
           zone=$(TZ=America/Denver date +%Z)
           run=yes
-          if [ "$SCHEDULE" = "47 12 * * *" ] && [ "$zone" != "MDT" ]; then run=no; fi
-          if [ "$SCHEDULE" = "47 13 * * *" ] && [ "$zone" != "MST" ]; then run=no; fi
+          if [ "$SCHEDULE" = "17 13 * * *" ] && [ "$zone" != "MDT" ]; then run=no; fi
+          if [ "$SCHEDULE" = "17 14 * * *" ] && [ "$zone" != "MST" ]; then run=no; fi
           echo "Denver is on $zone; schedule '${SCHEDULE:-none}'; run=$run"
           echo "run=$run" >> "$GITHUB_OUTPUT"
+      - name: Backup check (skip if the Cloudflare trigger already ran)
+        id: backup
+        if: steps.gate.outputs.run == 'yes' && github.event_name == 'schedule'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SCHEDULE: ${{ github.event.schedule }}
+        run: |
+          kind=morning
+          if [ "$SCHEDULE" = "13 20 * * *" ]; then kind=reminder; fi
+          since=$(date -u -d '-3 hours' +%Y-%m-%dT%H:%M:%SZ)
+          found=$(gh api "repos/${{ github.repository }}/actions/workflows/nightly.yml/runs?event=workflow_dispatch&per_page=30" \
+            --jq "[.workflow_runs[] | select(.display_title == \"nightly advisor (cloudflare-$kind)\" and .created_at > \"$since\" and (.status != \"completed\" or .conclusion == \"success\"))] | length")
+          echo "Cloudflare $kind runs since $since that did not fail: $found"
+          if [ "$found" -gt 0 ]; then
+            echo "run=no" >> "$GITHUB_OUTPUT"
+          else
+            echo "::warning::Cloudflare $kind trigger did not run (or failed); running the backup."
+            echo "run=yes" >> "$GITHUB_OUTPUT"
+          fi
       - uses: actions/checkout@v5
-        if: steps.gate.outputs.run == 'yes'
+        if: steps.gate.outputs.run == 'yes' && steps.backup.outputs.run != 'no'
       - uses: actions/setup-python@v6
-        if: steps.gate.outputs.run == 'yes'
+        if: steps.gate.outputs.run == 'yes' && steps.backup.outputs.run != 'no'
         with:
           python-version: "3.11"
       - name: Install uv
-        if: steps.gate.outputs.run == 'yes'
+        if: steps.gate.outputs.run == 'yes' && steps.backup.outputs.run != 'no'
         run: python -m pip install uv
       - name: Refresh this season's logs and the board from Sleeper
-        if: steps.gate.outputs.run == 'yes'
+        if: steps.gate.outputs.run == 'yes' && steps.backup.outputs.run != 'no'
         id: refresh
         continue-on-error: true
         run: |
@@ -86,7 +117,7 @@ jobs:
           uv run --python 3.11 python -m engine.jobs.refresh_current_season
           uv run --python 3.11 python -m engine.jobs.build_board
       - name: Run the advisor and post to Discord
-        if: steps.gate.outputs.run == 'yes'
+        if: steps.gate.outputs.run == 'yes' && steps.backup.outputs.run != 'no'
         env:
           REFRESH: ${{ steps.refresh.outcome }}
           DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
@@ -101,7 +132,7 @@ jobs:
           COMMIT_MESSAGE: ${{ github.event.head_commit.message }}
         run: |
           flag=""
-          if [ "$SCHEDULE" = "43 19 * * *" ] || [ "$DUE_TODAY_INPUT" = "true" ]; then
+          if [ "$SCHEDULE" = "13 20 * * *" ] || [ "$DUE_TODAY_INPUT" = "true" ]; then
             flag="--only-if-due-today"
           fi
           reason=""
