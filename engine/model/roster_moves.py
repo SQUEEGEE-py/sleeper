@@ -204,17 +204,21 @@ def lineup_outlook(players: Sequence[DepthPlayer], slots: Sequence[str],
 
     positions = sorted({slot_position(slot) for slot in slots})
     of_position = np.array([[slot_position(slot) == pos for slot in slots] for pos in positions])
+    healthy, _ = best(np.ones(n, dtype=bool))
+    # A player certain to be out (an active Out player, week_out 1.0) is absent in every
+    # outcome, so he is left out of the enumeration rather than counted against max_absent.
+    # Counting him there broke the report on 2026-11-28: with three such players and
+    # max_absent 2, every enumerated outcome had probability 0 and the total divided by zero.
+    certain_out = q >= 1.0
+    uncertain = np.flatnonzero(~certain_out)
     total = weight = 0.0
     unfilled = np.zeros(len(positions))
-    healthy = None
-    for k in range(min(max_absent, n) + 1):
-        for out in combinations(range(n), k):
-            mask = np.ones(n, dtype=bool)
+    for k in range(min(max_absent, len(uncertain)) + 1):
+        for out in combinations(uncertain, k):
+            mask = ~certain_out
             mask[list(out)] = False
-            w = float(np.prod(np.where(mask, 1.0 - q, q)))
+            w = float(np.prod(np.where(mask, 1.0 - q, q)[uncertain]))
             value, filled = best(mask)
-            if k == 0:
-                healthy = value
             total += w * value
             unfilled += w * (of_position & ~filled).any(axis=1)
             weight += w

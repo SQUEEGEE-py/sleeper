@@ -118,6 +118,23 @@ def test_outlook_equals_brute_force_over_every_absence() -> None:
         lineup_outlook(real, slots, max_absent=len(real)).expected, rel=0.001)
 
 
+def test_players_certain_to_be_out_do_not_use_up_the_absence_budget() -> None:
+    # 2026-11-28: three active Out players (week_out 1.0) with max_absent 2 left every
+    # enumerated outcome at probability 0 and the report crashed dividing by zero.
+    out = [d("Out1", "PG", 50, 1.0), d("Out2", "SF", 48, 1.0), d("Out3", "C", 47, 1.0)]
+    rest = [d("A", "PG", 40, 0.2), d("B", "C", 45, 0.1), d("F", "SF", 35, 0.05)]
+    slots = ["G#1", "C#1", "UTIL#1"]
+    with_out = lineup_outlook(out + rest, slots)  # the default max_absent, which crashed
+    without = lineup_outlook(rest, slots)
+    assert with_out.expected == pytest.approx(without.expected)
+    assert with_out.p_unfilled == pytest.approx(without.p_unfilled)
+    exact = lineup_outlook(rest, slots, max_absent=len(rest))
+    assert lineup_outlook(out + rest, slots, max_absent=len(rest)).expected == pytest.approx(exact.expected)
+    assert with_out.healthy == pytest.approx(50 + 48 + 47)  # "with everyone available"
+    everyone_out = lineup_outlook(out, slots)
+    assert everyone_out.expected == 0.0 and everyone_out.p_unfilled["C"] == 1.0
+
+
 def test_a_backup_at_the_uncovered_position_beats_a_better_player_elsewhere() -> None:
     # Neither improves the healthy lineup; the centre covers a slot that would otherwise sit
     # empty, the wing only improves on a 39 backup.
